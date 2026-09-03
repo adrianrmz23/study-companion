@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { User } from "@supabase/supabase-js";
 import {
   BarChart3,
   BookOpen,
@@ -8,8 +9,12 @@ import {
   CircleAlert,
   CircleHelp,
   Clock3,
+  Cloud,
+  CloudOff,
   Headphones,
   Lightbulb,
+  LogIn,
+  LogOut,
   LoaderCircle,
   MessageCircle,
   Plus,
@@ -26,6 +31,8 @@ import ResearchModal, { ResearchResult, ResearchSource } from "./ResearchModal";
 import AudioModal from "./AudioModal";
 import AdaptiveModal from "./AdaptiveModal";
 import SpeakButton from "./SpeakButton";
+import AuthModal from "./AuthModal";
+import { supabase, supabaseConfigured } from "./supabase";
 
 type Mode = "Explicar" | "Sintetizar" | "Ejemplo" | "Otra forma";
 type Role = "user" | "assistant";
@@ -72,6 +79,7 @@ type LearningProfile = {
   difficultySignals: number;
   concepts: Record<string, ConceptStat>;
   lastQuizAt?: string;
+  updatedAt?: string;
 };
 
 const starterHistory = [
@@ -118,8 +126,17 @@ function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function normalizeKey(value: string) {
+  return value.trim().toLocaleLowerCase("es-MX").replace(/\s+/g, " ");
+}
+
 function profileKey(subject: string, topic: string) {
-  return `companion-profile:${subject.trim().toLowerCase()}::${topic.trim().toLowerCase()}`;
+  return `companion-profile:${normalizeKey(subject)}::${normalizeKey(topic)}`;
+}
+
+function profileTimestamp(profile: LearningProfile | null | undefined) {
+  const value = profile?.updatedAt ? Date.parse(profile.updatedAt) : 0;
+  return Number.isFinite(value) ? value : 0;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -182,6 +199,11 @@ export default function App() {
   const [audioFocusText, setAudioFocusText] = useState("");
   const [adaptiveOpen, setAdaptiveOpen] = useState(false);
   const [profile, setProfile] = useState<LearningProfile>(emptyProfile);
+  const [user, setUser] = useState<User | null>(null);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authReady, setAuthReady] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<"local" | "syncing" | "synced" | "error">("local");
+  const [syncMessage, setSyncMessage] = useState("");
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const contextLabel = useMemo(() => {
@@ -240,21 +262,158 @@ export default function App() {
   }, [messages]);
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(profileKey(subject, topic));
-      setProfile(saved ? { ...emptyProfile, ...JSON.parse(saved) } : emptyProfile);
-    } catch {
-      setProfile(emptyProfile);
+    if (!supabase) {
+      setAuthReady(true);
+      return;
     }
-  }, [subject, topic]);
+
+    let active = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!active) return;
+      setUser(data.session?.user ?? null);
+      setAuthReady(true);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return;
+      setUser(session?.user ?? null);
+      setAuthReady(true);
+    });
+
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadProfile = async () => {
+      let localProfile: LearningProfile = emptyProfile;
+      try {
+        const saved = localStorage.getItem(profileKey(subject, topic));
+        localProfile = saved ? { ...emptyProfile, ...JSON.parse(saved) } : emptyProfile;
+      } catch {
+        localProfile = emptyProfile;
+      }
+
+      if (!user || !supabase) {
+        if (!cancelled) {
+          setProfile(localProfile);
+          setSyncStatus("local");
+          setSyncMessage("");
+        }
+        return;
+      }
+
+      if (!cancelled) {
+        setSyncStatus("syncing");
+        setSyncMessage("Sincronizando progreso…");
+      }
+
+      const subjectKey = normalizeKey(subject);
+      const topicKey = normalizeKey(topic);
+      const { data, error: fetchError } = await supabase
+        .from("learning_profiles")
+        .select("profile, updated_at")
+        .eq("user_id", user.id)
+        .eq("subject_key", subjectKey)
+        .eq("topic_key", topicKey)
+        .maybeSingle();
+
+      if (cancelled) return;
+      if (fetchError) {
+        setProfile(localProfile);
+        setSyncStatus("error");
+        setSyncMessage("No pude leer el progreso de Supabase. Se conserva la copia local.");
+        return;
+      }
+
+      const cloudProfile = data?.profile
+        ? { ...emptyProfile, ...(data.profile as LearningProfile), updatedAt: (data.profile as LearningProfile).updatedAt || data.updated_at }
+        : null;
+      const localIsNewer = profileTimestamp(localProfile) > profileTimestamp(cloudProfile);
+      const chosen = cloudProfile && !localIsNewer ? cloudProfile : localProfile;
+
+      setProfile(chosen);
+      try {
+        localStorage.setItem(profileKey(subject, topic), JSON.stringify(chosen));
+      } catch {
+        // La nube sigue siendo la fuente principal cuando hay sesión iniciada.
+      }
+
+      if (!cloudProfile || localIsNewer) {
+        const now = chosen.updatedAt || new Date().toISOString();
+        const normalized = { ...chosen, updatedAt: now };
+        const { error: upsertError } = await supabase.from("learning_profiles").upsert({
+          user_id: user.id,
+          subject,
+          topic,
+          subject_key: subjectKey,
+          topic_key: topicKey,
+          profile: normalized,
+          updated_at: now
+        }, { onConflict: "user_id,subject_key,topic_key" });
+        if (cancelled) return;
+        if (upsertError) {
+          setSyncStatus("error");
+          setSyncMessage("El progreso quedó local, pero no pude subirlo a Supabase.");
+          return;
+        }
+        setProfile(normalized);
+        try { localStorage.setItem(profileKey(subject, topic), JSON.stringify(normalized)); } catch {}
+      }
+
+      setSyncStatus("synced");
+      setSyncMessage("Progreso sincronizado");
+    };
+
+    void loadProfile();
+    return () => { cancelled = true; };
+  }, [subject, topic, user?.id]);
 
   const persistProfile = (next: LearningProfile) => {
-    setProfile(next);
+    const normalized = { ...next, updatedAt: new Date().toISOString() };
+    setProfile(normalized);
     try {
-      localStorage.setItem(profileKey(subject, topic), JSON.stringify(next));
+      localStorage.setItem(profileKey(subject, topic), JSON.stringify(normalized));
     } catch {
-      // El perfil local es una mejora de experiencia; el chat debe seguir funcionando aunque el navegador bloquee storage.
+      // El chat debe seguir funcionando aunque el navegador bloquee storage.
     }
+
+    if (!user || !supabase) {
+      setSyncStatus("local");
+      return;
+    }
+
+    setSyncStatus("syncing");
+    setSyncMessage("Guardando en la nube…");
+    void supabase.from("learning_profiles").upsert({
+      user_id: user.id,
+      subject,
+      topic,
+      subject_key: normalizeKey(subject),
+      topic_key: normalizeKey(topic),
+      profile: normalized,
+      updated_at: normalized.updatedAt
+    }, { onConflict: "user_id,subject_key,topic_key" }).then(({ error: upsertError }) => {
+      if (upsertError) {
+        console.error("No fue posible sincronizar el perfil:", upsertError.message);
+        setSyncStatus("error");
+        setSyncMessage("No pude sincronizar. Tu copia local sigue guardada.");
+        return;
+      }
+      setSyncStatus("synced");
+      setSyncMessage("Progreso sincronizado");
+    });
+  };
+
+  const signOut = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setSyncStatus("local");
+    setSyncMessage("");
   };
 
   const appendStreamText = (assistantId: string, addition: string) => {
@@ -569,6 +728,27 @@ export default function App() {
           <small>{profile.quizzesCompleted ? `${profile.quizzesCompleted} quiz completado${profile.quizzesCompleted === 1 ? "" : "s"}` : "Haz un quiz para medir tu dominio"}</small>
         </button>
 
+        <div className={`sync-card ${user ? "signed-in" : "signed-out"}`}>
+          <div className="sync-card-top">
+            <span className={`sync-dot ${syncStatus}`} />
+            <div>
+              <strong>{user ? "Progreso en la nube" : "Progreso local"}</strong>
+              <span>{user?.email || (supabaseConfigured ? "Inicia sesión para sincronizar" : "Supabase pendiente")}</span>
+            </div>
+          </div>
+          {user ? (
+            <>
+              <small>{syncStatus === "syncing" ? "Sincronizando…" : syncStatus === "error" ? syncMessage : "Disponible en tus otros dispositivos"}</small>
+              <button className="sync-action secondary" onClick={() => void signOut()}><LogOut size={15} /> Cerrar sesión</button>
+            </>
+          ) : (
+            <button className="sync-action" onClick={() => setAuthOpen(true)} disabled={!authReady}>
+              {supabaseConfigured ? <Cloud size={15} /> : <CloudOff size={15} />}
+              {supabaseConfigured ? "Sincronizar progreso" : "Configurar Supabase"}
+            </button>
+          )}
+        </div>
+
         <div className="provider-card">
           <div className="provider-line">
             <span className={`provider-dot ${health?.configured ? "online" : "offline"}`} />
@@ -783,6 +963,8 @@ export default function App() {
         onUsePrompt={useAdaptivePrompt}
       />
 
+      <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} />
+
       {quizOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(e) => {
           if (e.target === e.currentTarget) setQuizOpen(false);
@@ -874,7 +1056,7 @@ export default function App() {
               <div className="quiz-result">
                 <div className="result-score">{finalCorrect}<span>/{quiz.questions.length}</span></div>
                 <h3>{finalCorrect === quiz.questions.length ? "Muy bien, el tema está bastante claro." : finalCorrect >= 2 ? "Vas bien. Hay un punto que conviene reforzar." : "Encontramos qué conviene repasar."}</h3>
-                <p>Este resultado ya se añadió a tu perfil local de aprendizaje para detectar fortalezas y conceptos débiles.</p>
+                <p>Este resultado ya se añadió a tu perfil de aprendizaje para detectar fortalezas y conceptos débiles; con sesión iniciada también se sincroniza con Supabase.</p>
                 <div className="result-actions">
                   <button className="secondary-action" onClick={() => { setQuizOpen(false); setProfileOpen(true); }}><BarChart3 size={17} /> Ver mi aprendizaje</button>
                   <button className="primary-action" onClick={restartQuiz}><RefreshCcw size={17} /> Otro quiz</button>
@@ -908,7 +1090,7 @@ export default function App() {
             <div className="profile-section">
               <div className="profile-section-heading">
                 <div><span className="mini-label">CONCEPTOS</span><h3>Qué dominas y qué reforzar</h3></div>
-                <span className="local-badge">Guardado en este navegador</span>
+                <span className={`local-badge ${user ? "cloud" : ""}`}>{user ? "Sincronizado con Supabase" : "Guardado en este navegador"}</span>
               </div>
 
               {!conceptRows.length ? (
@@ -937,7 +1119,7 @@ export default function App() {
 
             <div className="profile-note">
               <Brain size={19} />
-              <p><strong>El tutor adaptativo ya usa estos datos.</strong> Los quizzes, los conceptos con menor acierto y las veces que marcas “No lo entendí” influyen en el siguiente plan y en los próximos quizzes. El guardado sigue siendo local en este navegador.</p>
+              <p><strong>El tutor adaptativo ya usa estos datos.</strong> Los quizzes, los conceptos con menor acierto y las veces que marcas “No lo entendí” influyen en el siguiente plan y en los próximos quizzes. Con sesión iniciada, este perfil se sincroniza con Supabase y queda disponible en tus otros dispositivos.</p>
             </div>
           </section>
         </div>
