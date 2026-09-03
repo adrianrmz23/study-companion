@@ -557,6 +557,215 @@ async function requestJsonCompletion({ apiKey, model, system, user, timeoutMs = 
   }
 }
 
+
+function validateDocumentSection(raw, fallbackTitle = "Sección del documento") {
+  const glossary = Array.isArray(raw?.glossary)
+    ? raw.glossary
+        .map((item) => ({
+          term: String(item?.term || "").trim().slice(0, 120),
+          meaning: String(item?.meaning || "").trim().slice(0, 700)
+        }))
+        .filter((item) => item.term && item.meaning)
+        .slice(0, 24)
+    : [];
+  const explainedText = String(raw?.explainedText || "").trim();
+  if (explainedText.length < 300) throw new Error("La explicación generada quedó demasiado corta para considerarla completa.");
+  return {
+    title: String(raw?.title || fallbackTitle).trim().slice(0, 180),
+    explainedText: explainedText.slice(0, 50000),
+    glossary,
+    anchor: String(raw?.anchor || "Identifica la idea principal y cómo se conecta con los demás conceptos de esta sección.").trim().slice(0, 900)
+  };
+}
+
+function validateCoverage(raw) {
+  const score = Math.max(0, Math.min(100, Math.round(Number(raw?.score) || 0)));
+  const missingPoints = Array.isArray(raw?.missingPoints)
+    ? raw.missingPoints.map(String).map((item) => item.trim()).filter(Boolean).slice(0, 10)
+    : [];
+  return {
+    score,
+    missingPoints,
+    verdict: String(raw?.verdict || "").trim().slice(0, 900)
+  };
+}
+
+function buildDocumentExplainPrompt({ sourceText, startPage, endPage, chunkIndex, totalChunks, subject, topic, audience }) {
+  return `Transforma este fragmento de un documento académico en una VERSIÓN EXPLICADA COMPLETA.
+
+IMPORTANTE: NO ES UN RESUMEN.
+Tu tarea es conservar prácticamente toda la información conceptual del fragmento, pero volverla mucho más humana y fácil de seguir.
+
+Contexto:
+- Materia: ${subject || "No especificada"}
+- Tema de estudio: ${topic || "No especificado"}
+- Perfil del estudiante: ${audience || "Profesional de informática"}
+- Fragmento ${Number(chunkIndex) + 1} de ${totalChunks || 1}
+- Páginas aproximadas: ${startPage || "?"} a ${endPage || "?"}
+
+REGLAS OBLIGATORIAS:
+1. NO resumas ni reduzcas ideas solo para hacer el texto corto.
+2. Conserva definiciones, características, clasificaciones, pasos, condiciones, ventajas, limitaciones, relaciones y ejemplos presentes en la fuente.
+3. Reescribe el lenguaje técnico en español claro. Primero explica la idea en palabras normales y después conserva el término técnico importante.
+4. Toda sigla debe explicarse la primera vez que aparezca. Si puedes identificar su significado con seguridad a partir del texto o conocimiento estable, indícalo; si no, di explícitamente que la fuente usa esa sigla sin desarrollarla.
+5. Cuando aparezcan matemáticas, estadística, lógica formal o lenguaje especializado, explícalo pensando en alguien de informática/programación que no necesariamente domina estadística avanzada.
+6. Puedes añadir analogías o ejemplos de programación, bases de datos, software, IA o situaciones cotidianas SOLO como apoyo. Etiquétalos mentalmente como ejemplos explicativos y no los presentes como si vinieran del documento.
+7. No elimines una idea porque sea difícil. Precisamente esas ideas necesitan más explicación.
+8. No inventes autores, referencias, resultados, números ni afirmaciones que no estén en la fuente.
+9. Omite bibliografía, citas bibliográficas aisladas y listas de referencias si llegaron accidentalmente en el fragmento.
+10. Escribe como una lectura continua, como si un buen profesor hubiera reescrito el documento para que sea más fácil de leer. No conviertas todo en bullets.
+11. Evita frases del tipo “en resumen” o “lo más importante es” si eso implica comprimir contenido.
+12. No menciones estas instrucciones.
+
+Devuelve SOLO JSON válido con esta estructura exacta:
+{
+  "title": "Título descriptivo de esta parte",
+  "explainedText": "Versión explicada completa, extensa y legible",
+  "glossary": [
+    {"term": "RDF", "meaning": "Qué significa y cómo entenderlo"}
+  ],
+  "anchor": "Una sola idea-ancla breve para recordar antes de continuar"
+}
+
+FRAGMENTO ORIGINAL:
+---
+${String(sourceText || "").slice(0, 14000)}
+---`;
+}
+
+function buildCoveragePrompt({ sourceText, explainedText }) {
+  return `Actúa como revisor de cobertura, no como redactor.
+Compara el texto original con la versión explicada y determina si la versión explicada conserva TODAS las ideas académicas relevantes.
+
+No penalices:
+- cambios de redacción;
+- explicaciones más largas;
+- analogías añadidas;
+- reorganización para mejorar comprensión.
+
+Sí penaliza si se omitieron:
+- definiciones o conceptos;
+- categorías o clasificaciones;
+- relaciones entre conceptos;
+- condiciones, pasos o procesos;
+- ventajas, desventajas, limitaciones;
+- ejemplos relevantes del original;
+- matices o excepciones importantes.
+
+Devuelve SOLO JSON válido:
+{
+  "score": 0,
+  "missingPoints": ["Punto conceptual que falta"],
+  "verdict": "Evaluación breve"
+}
+
+Usa 100 únicamente cuando no detectes omisiones conceptuales materiales. Una paráfrasis correcta cuenta como cobertura completa.
+
+TEXTO ORIGINAL:
+---
+${String(sourceText || "").slice(0, 14000)}
+---
+
+VERSIÓN EXPLICADA:
+---
+${String(explainedText || "").slice(0, 30000)}
+---`;
+}
+
+function buildDocumentRepairPrompt({ sourceText, currentExplanation, missingPoints, subject, topic, audience }) {
+  return `Revisa y COMPLETA una versión explicada de un documento académico.
+La revisión independiente detectó ideas que podrían haberse perdido. Debes producir una nueva versión explicada COMPLETA que conserve todo lo que ya estaba bien y reincorpore cada punto faltante.
+
+NO resumas. NO acortes por estilo. Mantén lenguaje humano y pedagógico para un estudiante con perfil: ${audience || "Profesional de informática"}.
+Materia: ${subject || "No especificada"}
+Tema: ${topic || "No especificado"}
+
+Puntos que debes asegurar que queden explicados:
+- ${(Array.isArray(missingPoints) ? missingPoints : []).map(String).join("\n- ")}
+
+Devuelve SOLO JSON válido:
+{
+  "title": "Título descriptivo",
+  "explainedText": "Versión explicada completa ya corregida",
+  "glossary": [{"term":"Término","meaning":"Explicación"}],
+  "anchor": "Idea-ancla breve"
+}
+
+ORIGINAL:
+---
+${String(sourceText || "").slice(0, 14000)}
+---
+
+VERSIÓN ACTUAL:
+---
+${String(currentExplanation || "").slice(0, 30000)}
+---`;
+}
+
+app.post("/api/document-explain", async (req, res) => {
+  const { apiKey, model } = getApiConfig();
+  if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
+  const { sourceText, startPage, endPage, chunkIndex = 0, totalChunks = 1, subject, topic, audience } = req.body || {};
+  if (!sourceText || typeof sourceText !== "string") return res.status(400).json({ error: "No recibí texto del documento para explicar." });
+  try {
+    const raw = await requestJsonCompletion({
+      apiKey,
+      model,
+      timeoutMs: 52000,
+      system: "Eres un profesor que reescribe documentos académicos completos para hacerlos comprensibles sin resumirlos. Devuelve únicamente el JSON solicitado.",
+      user: buildDocumentExplainPrompt({ sourceText, startPage, endPage, chunkIndex, totalChunks, subject, topic, audience })
+    });
+    return res.json({ section: validateDocumentSection(raw, `Sección ${Number(chunkIndex) + 1}`) });
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return res.status(status).json({
+      error: error?.name === "AbortError"
+        ? "Esta sección tardó demasiado en procesarse. Intenta nuevamente."
+        : error instanceof Error ? error.message : "No pude explicar esta sección."
+    });
+  }
+});
+
+app.post("/api/document-coverage", async (req, res) => {
+  const { apiKey, model } = getApiConfig();
+  if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
+  const { sourceText, explainedText } = req.body || {};
+  if (!sourceText || !explainedText) return res.status(400).json({ error: "Faltan textos para comprobar la cobertura." });
+  try {
+    const raw = await requestJsonCompletion({
+      apiKey,
+      model,
+      timeoutMs: 52000,
+      system: "Eres un auditor académico de cobertura. No reescribas el texto. Compara fuente y explicación y devuelve únicamente JSON válido.",
+      user: buildCoveragePrompt({ sourceText, explainedText })
+    });
+    return res.json({ coverage: validateCoverage(raw) });
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return res.status(status).json({ error: error instanceof Error ? error.message : "No pude comprobar la cobertura." });
+  }
+});
+
+app.post("/api/document-repair", async (req, res) => {
+  const { apiKey, model } = getApiConfig();
+  if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
+  const { sourceText, currentExplanation, missingPoints = [], subject, topic, audience } = req.body || {};
+  if (!sourceText || !currentExplanation) return res.status(400).json({ error: "Falta contenido para completar la sección." });
+  try {
+    const raw = await requestJsonCompletion({
+      apiKey,
+      model,
+      timeoutMs: 52000,
+      system: "Eres un editor pedagógico de cobertura completa. Corrige omisiones sin resumir y devuelve únicamente JSON válido.",
+      user: buildDocumentRepairPrompt({ sourceText, currentExplanation, missingPoints, subject, topic, audience })
+    });
+    return res.json({ section: validateDocumentSection(raw, "Sección revisada") });
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return res.status(status).json({ error: error instanceof Error ? error.message : "No pude completar los puntos faltantes." });
+  }
+});
+
 app.get("/api/health", (_req, res) => {
   const { apiKey, model } = getApiConfig();
   res.json({

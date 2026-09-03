@@ -11,6 +11,7 @@ import {
   Clock3,
   Cloud,
   CloudOff,
+  FileAudio,
   Headphones,
   Lightbulb,
   LogIn,
@@ -32,6 +33,7 @@ import AudioModal from "./AudioModal";
 import AdaptiveModal from "./AdaptiveModal";
 import SpeakButton from "./SpeakButton";
 import AuthModal from "./AuthModal";
+import DocumentExplainerModal from "./DocumentExplainerModal";
 import { supabase, supabaseConfigured } from "./supabase";
 
 type Mode = "Explicar" | "Sintetizar" | "Ejemplo" | "Otra forma";
@@ -198,6 +200,7 @@ export default function App() {
   const [audioOpen, setAudioOpen] = useState(false);
   const [audioFocusText, setAudioFocusText] = useState("");
   const [adaptiveOpen, setAdaptiveOpen] = useState(false);
+  const [documentOpen, setDocumentOpen] = useState(false);
   const [profile, setProfile] = useState<LearningProfile>(emptyProfile);
   const [user, setUser] = useState<User | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
@@ -679,6 +682,23 @@ export default function App() {
     }, 50);
   };
 
+  const useDocumentInChat = (sectionTitle: string, explainedText: string) => {
+    setDocumentOpen(false);
+    setMode("Explicar");
+    setMessages((current) => [
+      ...current,
+      {
+        id: makeId(),
+        role: "assistant",
+        content: `**Documento explicado · ${sectionTitle}**\n\n${explainedText}`
+      }
+    ]);
+    setInput(`Ayúdame a profundizar en la sección “${sectionTitle}”. `);
+    window.setTimeout(() => {
+      document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+    }, 60);
+  };
+
   const currentQuestion = quiz?.questions[quizIndex];
   const currentCorrect = currentQuestion && selectedAnswer !== null
     ? selectedAnswer === currentQuestion.answerIndex
@@ -825,6 +845,16 @@ export default function App() {
         </section>
 
         <div className="study-tools-grid">
+          <section className="document-launch-card">
+            <div className="tool-card-icon document"><FileAudio size={20} /></div>
+            <div>
+              <span className="mini-label">NUEVO · DOCUMENTO EXPLICADO</span>
+              <strong>Sube un PDF y conviértelo en una clase completa</strong>
+              <p>No resume: reexplica todo el contenido en lenguaje humano, aclara siglas, comprueba cobertura y lo narra con ElevenLabs.</p>
+            </div>
+            <button onClick={() => setDocumentOpen(true)}><FileAudio size={17} /> Subir PDF</button>
+          </section>
+
           <section className="research-launch-card">
             <div className="research-launch-icon">🌐</div>
             <div className="research-launch-copy">
@@ -934,6 +964,15 @@ export default function App() {
           <div className="composer-hint">Enter para enviar · Shift + Enter para salto de línea</div>
         </form>
       </main>
+
+      <DocumentExplainerModal
+        open={documentOpen}
+        userId={user?.id || null}
+        subject={subject}
+        topic={topic}
+        onClose={() => setDocumentOpen(false)}
+        onUseInChat={useDocumentInChat}
+      />
 
       <ResearchModal
         open={researchOpen}

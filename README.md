@@ -67,3 +67,21 @@ Tabla `learning_profiles`:
 - `updated_at`
 
 Hay una fila única por usuario + materia + tema.
+
+## Documento explicado · v1.4
+
+Nueva función para convertir PDFs académicos técnicos en una versión explicada completa (no resumen) y escucharla con ElevenLabs.
+
+Flujo:
+1. El PDF se lee localmente en el navegador con PDF.js; el archivo original no se envía ni se almacena.
+2. Companion elimina la bibliografía final cuando la detecta y divide el contenido en bloques manejables.
+3. Cheaper Inference reexplica cada bloque conservando conceptos, definiciones, condiciones, clasificaciones y matices.
+4. Una segunda llamada independiente comprueba cobertura. Si detecta omisiones materiales, Companion intenta reparar la sección y la vuelve a verificar.
+5. La versión explicada, el glosario, la cobertura y el capítulo donde te quedaste se guardan en Supabase si tienes sesión iniciada.
+6. ElevenLabs genera el audio bajo demanda por fragmentos para poder escuchar documentos largos sin el límite de 9,500 caracteres por llamada.
+
+### Migración nueva de Supabase
+
+Ejecuta `supabase/003_study_documents.sql` en SQL Editor antes de usar el guardado entre dispositivos.
+
+No requiere nuevas variables de entorno. Reutiliza las de Cheaper Inference, ElevenLabs y Supabase que ya usa Companion.

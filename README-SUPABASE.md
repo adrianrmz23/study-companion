@@ -47,3 +47,7 @@ Al iniciar sesión, Companion:
 5. guarda nuevos quizzes y señales de dificultad en Supabase.
 
 La tabla usa Row Level Security para que cada cuenta solo pueda leer y modificar sus propias filas.
+
+## Documentos explicados
+
+Ejecuta también `supabase/003_study_documents.sql`. Crea `public.study_documents` con RLS por `auth.uid()` para guardar únicamente la versión explicada, glosario, cobertura y progreso de reproducción. El PDF original no se persiste.
