@@ -1386,3 +1386,85 @@ h1 {
 @media (max-width: 900px) {
   .sync-card { margin-top: 14px; }
 }
+
+/* Companion 1.3 · Login / registro con Supabase */
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin: 18px 28px 0;
+  padding: 5px;
+  border: 1px solid #e6e1eb;
+  border-radius: 13px;
+  background: #f5f3f8;
+}
+.auth-tabs button {
+  min-height: 40px;
+  border: 0;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: transparent;
+  color: #817a8a;
+  font-size: 12px;
+  font-weight: 800;
+}
+.auth-tabs button.active {
+  background: white;
+  color: #604bc7;
+  box-shadow: 0 4px 14px rgba(52, 42, 73, .07);
+}
+.auth-content .auth-field + .auth-field { margin-top: 12px; }
+.auth-input-with-icon {
+  min-height: 46px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #dfdae6;
+  border-radius: 12px;
+  background: #fcfbfd;
+  color: #9b93a3;
+}
+.auth-input-with-icon:focus-within {
+  border-color: #a99bef;
+  box-shadow: 0 0 0 3px #f0edff;
+}
+.auth-input-with-icon input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  padding: 12px 0;
+  background: transparent;
+  box-shadow: none !important;
+}
+.auth-input-with-icon.password { padding-right: 6px; }
+.auth-password-toggle {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: #8d8596;
+}
+.auth-password-toggle:hover { background: #f0edf5; color: #665d72; }
+.auth-success-message {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #cfe8d8;
+  border-radius: 10px;
+  background: #f2fbf5;
+  color: #4b7f5d;
+  font-size: 11px;
+  line-height: 1.45;
+}
+@media (max-width: 520px) {
+  .auth-tabs { margin: 14px 16px 0; }
+  .auth-tabs button { font-size: 11px; }
+  .auth-content { padding: 22px 16px; }
+}

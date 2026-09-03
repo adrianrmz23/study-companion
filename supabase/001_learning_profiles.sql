@@ -1,4 +1,6 @@
--- Companion · progreso sincronizado por usuario, materia y tema.
+-- Companion · sincronización de progreso por usuario, materia y tema.
+-- Ejecuta este archivo completo en Supabase > SQL Editor.
+
 create extension if not exists pgcrypto;
 
 create table if not exists public.learning_profiles (
@@ -11,31 +13,51 @@ create table if not exists public.learning_profiles (
   profile jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (user_id, subject_key, topic_key)
+  constraint learning_profiles_profile_is_object
+    check (jsonb_typeof(profile) = 'object'),
+  constraint learning_profiles_user_subject_topic_unique
+    unique (user_id, subject_key, topic_key)
 );
 
 alter table public.learning_profiles enable row level security;
 
+-- Permite volver a ejecutar la query sin errores de políticas duplicadas.
+drop policy if exists "Users can read their own learning profiles" on public.learning_profiles;
+drop policy if exists "Users can insert their own learning profiles" on public.learning_profiles;
+drop policy if exists "Users can update their own learning profiles" on public.learning_profiles;
+drop policy if exists "Users can delete their own learning profiles" on public.learning_profiles;
+
 create policy "Users can read their own learning profiles"
-on public.learning_profiles for select
+on public.learning_profiles
+for select
 to authenticated
 using (auth.uid() = user_id);
 
 create policy "Users can insert their own learning profiles"
-on public.learning_profiles for insert
+on public.learning_profiles
+for insert
 to authenticated
 with check (auth.uid() = user_id);
 
 create policy "Users can update their own learning profiles"
-on public.learning_profiles for update
+on public.learning_profiles
+for update
 to authenticated
 using (auth.uid() = user_id)
 with check (auth.uid() = user_id);
 
 create policy "Users can delete their own learning profiles"
-on public.learning_profiles for delete
+on public.learning_profiles
+for delete
 to authenticated
 using (auth.uid() = user_id);
 
 create index if not exists learning_profiles_user_updated_idx
   on public.learning_profiles (user_id, updated_at desc);
+
+create index if not exists learning_profiles_lookup_idx
+  on public.learning_profiles (user_id, subject_key, topic_key);
+
+-- No se otorgan permisos a anon. El acceso se hace únicamente como usuario autenticado.
+revoke all on table public.learning_profiles from anon;
+grant select, insert, update, delete on table public.learning_profiles to authenticated;
