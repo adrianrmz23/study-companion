@@ -85,3 +85,15 @@ Flujo:
 Ejecuta `supabase/003_study_documents.sql` en SQL Editor antes de usar el guardado entre dispositivos.
 
 No requiere nuevas variables de entorno. Reutiliza las de Cheaper Inference, ElevenLabs y Supabase que ya usa Companion.
+
+
+## v1.4.1 — Procesamiento resistente de documentos
+
+- Divide PDFs en bloques más pequeños (aprox. 3,600–4,400 caracteres).
+- Si una sección excede el tiempo, la divide automáticamente y continúa.
+- Reintenta errores temporales del proveedor.
+- Un timeout de cobertura ya no detiene todo el documento.
+- Guarda la cola de procesamiento y checkpoints temporales en Supabase.
+- Los documentos pausados pueden reanudarse desde la biblioteca.
+- El texto fuente temporal se elimina de `settings.processing` al completar el documento.
+- Vercel Function `api/index.mjs` usa `maxDuration: 120`.

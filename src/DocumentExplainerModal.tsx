@@ -41,6 +41,7 @@ export type ExplainedDocumentSection = {
   coverageScore: number;
   missingPoints: string[];
   repaired?: boolean;
+  coveragePending?: boolean;
 };
 
 type ExplainedDocument = {
@@ -54,6 +55,7 @@ type ExplainedDocument = {
   sections: ExplainedDocumentSection[];
   glossary: GlossaryItem[];
   coverageScore: number;
+  coveragePendingCount: number;
   createdAt: string;
   updatedAt: string;
   lastSectionIndex: number;
@@ -70,7 +72,8 @@ type SavedDocumentRow = {
   source_chars: number;
   sections: ExplainedDocumentSection[] | null;
   glossary: GlossaryItem[] | null;
-  coverage: { score?: number } | null;
+  settings: DocumentSettings | null;
+  coverage: { score?: number; pendingSections?: number; checkedSections?: number } | null;
   last_section_index: number | null;
   created_at: string;
   updated_at: string;
@@ -78,6 +81,21 @@ type SavedDocumentRow = {
 
 type SourcePage = { page: number; text: string };
 type SourceChunk = { id: string; startPage: number; endPage: number; text: string };
+type ProcessingState = {
+  chunks: SourceChunk[];
+  nextChunkIndex: number;
+  totalChunks: number;
+  sourceFileName: string;
+  updatedAt?: string;
+};
+type DocumentSettings = {
+  audience?: string;
+  mode?: string;
+  explainAcronyms?: boolean;
+  preserveTechnicalTerms?: boolean;
+  omitReferences?: boolean;
+  processing?: ProcessingState;
+};
 
 type Props = {
   open: boolean;
@@ -125,7 +143,7 @@ function stripReferences(pages: SourcePage[]) {
   return output;
 }
 
-function splitLongText(text: string, maxChars = 7600) {
+function splitLongText(text: string, maxChars = 4200) {
   if (text.length <= maxChars) return [text];
   const paragraphs = text.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
   const parts: string[] = [];
@@ -160,7 +178,7 @@ function splitLongText(text: string, maxChars = 7600) {
   return parts;
 }
 
-function buildChunks(pages: SourcePage[], targetChars = 6800, maxChars = 8200): SourceChunk[] {
+function buildChunks(pages: SourcePage[], targetChars = 3600, maxChars = 4400): SourceChunk[] {
   const chunks: SourceChunk[] = [];
   let currentText = "";
   let startPage = pages[0]?.page || 1;
@@ -208,6 +226,72 @@ function buildChunks(pages: SourcePage[], targetChars = 6800, maxChars = 8200): 
   }
   pushCurrent();
   return chunks;
+}
+
+function splitChunkForRetry(chunk: SourceChunk): SourceChunk[] {
+  const text = chunk.text.trim();
+  if (text.length < 1400) return [chunk];
+  const midpoint = Math.floor(text.length / 2);
+  const boundaries: number[] = [];
+  const boundaryPattern = /\n{2,}|(?<=[.!?])\s+/g;
+  let match: RegExpExecArray | null;
+  while ((match = boundaryPattern.exec(text))) {
+    const position = match.index + match[0].length;
+    if (position > 500 && position < text.length - 500) boundaries.push(position);
+  }
+  const splitAt = boundaries.length
+    ? boundaries.reduce((best, value) => Math.abs(value - midpoint) < Math.abs(best - midpoint) ? value : best, boundaries[0])
+    : midpoint;
+  const first = text.slice(0, splitAt).trim();
+  const second = text.slice(splitAt).trim();
+  if (first.length < 450 || second.length < 450) return [chunk];
+  return [
+    { ...chunk, id: `${chunk.id}-a`, text: first },
+    { ...chunk, id: `${chunk.id}-b`, text: second }
+  ];
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function postJson(url: string, body: unknown) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload?.error || `La solicitud falló con estado ${response.status}.`) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+function errorStatus(error: unknown) {
+  return Number((error as { status?: number })?.status || 0);
+}
+
+function isTimeoutLike(error: unknown) {
+  const status = errorStatus(error);
+  const message = error instanceof Error ? error.message.toLocaleLowerCase("es-MX") : "";
+  return [408, 502, 504].includes(status)
+    || message.includes("tardó demasiado")
+    || message.includes("timeout")
+    || message.includes("timed out")
+    || message.includes("aborted");
+}
+
+function isRetryable(error: unknown) {
+  return isTimeoutLike(error) || [425, 429, 500, 503].includes(errorStatus(error));
+}
+
+function verifiedCoverageAverage(sections: ExplainedDocumentSection[]) {
+  const checked = sections.filter((section) => !section.coveragePending);
+  if (!checked.length) return 0;
+  return Math.round(checked.reduce((sum, section) => sum + section.coverageScore, 0) / checked.length);
 }
 
 function dedupeGlossary(items: GlossaryItem[]) {
@@ -270,6 +354,7 @@ function rowToDocument(row: SavedDocumentRow): ExplainedDocument {
     sections: Array.isArray(row.sections) ? row.sections : [],
     glossary: Array.isArray(row.glossary) ? row.glossary : [],
     coverageScore: Number(row.coverage?.score || 0),
+    coveragePendingCount: Math.max(0, Number(row.coverage?.pendingSections) || 0),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     lastSectionIndex: Math.max(0, Number(row.last_section_index) || 0)
@@ -337,7 +422,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     setLibraryError("");
     const { data, error: fetchError } = await supabase
       .from("study_documents")
-      .select("id,title,file_name,subject,topic,status,page_count,source_chars,sections,glossary,coverage,last_section_index,created_at,updated_at")
+      .select("id,title,file_name,subject,topic,status,page_count,source_chars,sections,glossary,settings,coverage,last_section_index,created_at,updated_at")
       .eq("user_id", userId)
       .order("updated_at", { ascending: false })
       .limit(12);
@@ -402,10 +487,26 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     return { pages: stripReferences(pages), totalPages: pdf.numPages };
   };
 
-  const createCloudRow = async (selected: File, totalPages: number, sourceChars: number) => {
+  const baseSettings = (processing?: ProcessingState): DocumentSettings => ({
+    audience,
+    mode: "complete_not_summary",
+    explainAcronyms: true,
+    preserveTechnicalTerms: true,
+    omitReferences: true,
+    ...(processing ? { processing } : {})
+  });
+
+  const createCloudRow = async (selected: File, totalPages: number, sourceChars: number, chunks: SourceChunk[]) => {
     if (!userId || !supabase) return null;
     const now = new Date().toISOString();
     const title = selected.name.replace(/\.pdf$/i, "");
+    const processing: ProcessingState = {
+      chunks,
+      nextChunkIndex: 0,
+      totalChunks: chunks.length,
+      sourceFileName: selected.name,
+      updatedAt: now
+    };
     const { data, error: insertError } = await supabase
       .from("study_documents")
       .insert({
@@ -417,16 +518,10 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
         status: "processing",
         page_count: totalPages,
         source_chars: sourceChars,
-        settings: {
-          audience,
-          mode: "complete_not_summary",
-          explainAcronyms: true,
-          preserveTechnicalTerms: true,
-          omitReferences: true
-        },
+        settings: baseSettings(processing),
         sections: [],
         glossary: [],
-        coverage: {},
+        coverage: { score: 0, checkedSections: 0, pendingSections: 0 },
         last_section_index: 0,
         created_at: now,
         updated_at: now
@@ -441,23 +536,237 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     documentId: string | null,
     sections: ExplainedDocumentSection[],
     glossary: GlossaryItem[],
-    status: "processing" | "complete" | "error"
+    status: "processing" | "complete" | "error",
+    processing?: ProcessingState
   ) => {
     if (!documentId || !supabase) return;
-    const average = sections.length
-      ? Math.round(sections.reduce((sum, section) => sum + (section.coverageScore || 0), 0) / sections.length)
-      : 0;
+    const pendingSections = sections.filter((section) => section.coveragePending).length;
+    const checkedSections = sections.length - pendingSections;
+    const average = verifiedCoverageAverage(sections);
     const { error: updateError } = await supabase
       .from("study_documents")
       .update({
         sections,
         glossary,
-        coverage: { score: average, checkedSections: sections.length },
+        settings: baseSettings(status === "complete" ? undefined : processing),
+        coverage: { score: average, checkedSections, pendingSections },
         status,
         updated_at: new Date().toISOString()
       })
       .eq("id", documentId);
     if (updateError) throw new Error(`Supabase: ${updateError.message}`);
+  };
+
+  const explainChunk = async (chunk: SourceChunk, index: number, totalChunks: number) => {
+    return postJson("/api/document-explain", {
+      sourceText: chunk.text,
+      startPage: chunk.startPage,
+      endPage: chunk.endPage,
+      chunkIndex: index,
+      totalChunks,
+      subject,
+      topic,
+      audience
+    });
+  };
+
+  const requestCoverage = async (sourceText: string, explainedText: string) => {
+    return postJson("/api/document-coverage", { sourceText, explainedText });
+  };
+
+  const runProcessing = async ({
+    cloudId,
+    sourceChunks,
+    startIndex,
+    initialSections,
+    initialGlossary,
+    totalPages,
+    sourceChars,
+    title,
+    fileName
+  }: {
+    cloudId: string | null;
+    sourceChunks: SourceChunk[];
+    startIndex: number;
+    initialSections: ExplainedDocumentSection[];
+    initialGlossary: GlossaryItem[];
+    totalPages: number;
+    sourceChars: number;
+    title: string;
+    fileName: string;
+  }) => {
+    const queue = [...sourceChunks];
+    const explainedSections = [...initialSections];
+    let glossary = dedupeGlossary(initialGlossary);
+    let index = Math.max(0, Math.min(startIndex, queue.length));
+
+    while (index < queue.length) {
+      const chunk = queue[index];
+      const completedRatio = queue.length ? index / queue.length : 0;
+      const baseProgress = 16 + Math.round(completedRatio * 76);
+      setStage("explaining");
+      setProgress(Math.min(92, baseProgress));
+      setStageText(`Reexplicando ${index + 1} de ${queue.length} · páginas ${chunk.startPage}–${chunk.endPage}…`);
+
+      let explanationPayload: any;
+      try {
+        explanationPayload = await explainChunk(chunk, index, queue.length);
+      } catch (firstError) {
+        if (isTimeoutLike(firstError) && chunk.text.length > 1800) {
+          const smaller = splitChunkForRetry(chunk);
+          if (smaller.length > 1) {
+            queue.splice(index, 1, ...smaller);
+            setStageText(`La sección ${index + 1} tardó demasiado. La dividí automáticamente en partes más pequeñas para continuar…`);
+            await saveCloudProgress(cloudId, explainedSections, glossary, "processing", {
+              chunks: queue,
+              nextChunkIndex: index,
+              totalChunks: queue.length,
+              sourceFileName: fileName,
+              updatedAt: new Date().toISOString()
+            });
+            continue;
+          }
+        }
+
+        if (isRetryable(firstError)) {
+          setStageText(`Reintentando automáticamente la sección ${index + 1}…`);
+          await wait(errorStatus(firstError) === 429 ? 2600 : 1200);
+          try {
+            explanationPayload = await explainChunk(chunk, index, queue.length);
+          } catch (secondError) {
+            if (isTimeoutLike(secondError) && chunk.text.length > 1400) {
+              const smaller = splitChunkForRetry(chunk);
+              if (smaller.length > 1) {
+                queue.splice(index, 1, ...smaller);
+                await saveCloudProgress(cloudId, explainedSections, glossary, "processing", {
+                  chunks: queue,
+                  nextChunkIndex: index,
+                  totalChunks: queue.length,
+                  sourceFileName: fileName,
+                  updatedAt: new Date().toISOString()
+                });
+                continue;
+              }
+            }
+            throw secondError;
+          }
+        } else {
+          throw firstError;
+        }
+      }
+
+      let section = explanationPayload.section as Omit<ExplainedDocumentSection, "id" | "startPage" | "endPage" | "sourceChars" | "coverageScore" | "missingPoints">;
+
+      setStage("checking");
+      setStageText(`Comprobando que no falte contenido en la sección ${index + 1}…`);
+      setProgress(Math.min(94, baseProgress + 2));
+
+      let coverage: { score: number; missingPoints: string[]; verdict?: string } = { score: 0, missingPoints: [] };
+      let coveragePending = false;
+      try {
+        const coveragePayload = await requestCoverage(chunk.text, section.explainedText);
+        coverage = coveragePayload.coverage;
+      } catch (coverageError) {
+        if (isRetryable(coverageError)) {
+          setStageText(`La revisión de cobertura de la sección ${index + 1} está tardando. Reintentando una vez…`);
+          await wait(errorStatus(coverageError) === 429 ? 2400 : 900);
+          try {
+            const retryCoverage = await requestCoverage(chunk.text, section.explainedText);
+            coverage = retryCoverage.coverage;
+          } catch {
+            coveragePending = true;
+          }
+        } else {
+          coveragePending = true;
+        }
+      }
+
+      let repaired = false;
+      if (!coveragePending && (coverage.score || 0) < 90 && Array.isArray(coverage.missingPoints) && coverage.missingPoints.length) {
+        setStageText(`Completando puntos faltantes de la sección ${index + 1}…`);
+        try {
+          const repairPayload = await postJson("/api/document-repair", {
+            sourceText: chunk.text,
+            currentExplanation: section.explainedText,
+            missingPoints: coverage.missingPoints,
+            subject,
+            topic,
+            audience
+          });
+          if (repairPayload?.section?.explainedText) {
+            section = { ...section, ...repairPayload.section };
+            repaired = true;
+            try {
+              const recheckPayload = await requestCoverage(chunk.text, section.explainedText);
+              if (recheckPayload?.coverage) coverage = recheckPayload.coverage;
+            } catch {
+              // Conservamos la última revisión válida; una caída de la re-comprobación no borra el trabajo terminado.
+            }
+          }
+        } catch {
+          // Si la reparación falla, conservamos la explicación y los puntos pendientes en vez de detener todo el documento.
+        }
+      }
+
+      const normalized: ExplainedDocumentSection = {
+        id: `section-${explainedSections.length + 1}`,
+        title: String(section.title || `Sección ${explainedSections.length + 1}`),
+        startPage: chunk.startPage,
+        endPage: chunk.endPage,
+        sourceChars: chunk.text.length,
+        explainedText: String(section.explainedText || ""),
+        glossary: Array.isArray(section.glossary) ? section.glossary : [],
+        anchor: String(section.anchor || ""),
+        coverageScore: coveragePending ? 0 : Math.max(0, Math.min(100, Math.round(Number(coverage.score) || 0))),
+        missingPoints: coveragePending
+          ? ["Revisión de cobertura pendiente: el verificador tardó demasiado, pero la explicación sí quedó guardada."]
+          : Array.isArray(coverage.missingPoints) ? coverage.missingPoints.map(String).slice(0, 8) : [],
+        repaired,
+        coveragePending
+      };
+      explainedSections.push(normalized);
+      glossary = dedupeGlossary([...glossary, ...normalized.glossary]);
+      index += 1;
+
+      await saveCloudProgress(cloudId, explainedSections, glossary, "processing", {
+        chunks: queue,
+        nextChunkIndex: index,
+        totalChunks: queue.length,
+        sourceFileName: fileName,
+        updatedAt: new Date().toISOString()
+      });
+    }
+
+    setStage("saving");
+    setStageText("Guardando la versión explicada…");
+    setProgress(96);
+    await saveCloudProgress(cloudId, explainedSections, glossary, "complete");
+
+    const averageCoverage = verifiedCoverageAverage(explainedSections);
+    const pendingCount = explainedSections.filter((section) => section.coveragePending).length;
+    const now = new Date().toISOString();
+    const completed: ExplainedDocument = {
+      id: cloudId || undefined,
+      title,
+      fileName,
+      subject,
+      topic,
+      pageCount: totalPages,
+      sourceChars,
+      sections: explainedSections,
+      glossary,
+      coverageScore: averageCoverage,
+      coveragePendingCount: pendingCount,
+      createdAt: now,
+      updatedAt: now,
+      lastSectionIndex: 0
+    };
+    setResult(completed);
+    setExpanded({ [explainedSections[0]?.id || ""]: true });
+    setStage("done");
+    setStageText(pendingCount ? `Documento listo · ${pendingCount} revisión${pendingCount === 1 ? "" : "es"} de cobertura pendiente${pendingCount === 1 ? "" : "s"}` : "Documento listo");
+    setProgress(100);
+    void loadLibrary();
   };
 
   const process = async () => {
@@ -470,145 +779,89 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     setStageText("Abriendo el PDF…");
 
     let cloudId: string | null = null;
+    let chunks: SourceChunk[] = [];
+    let sourceChars = 0;
+    let totalPages = 0;
     try {
-      const { pages, totalPages } = await extractPages(file);
-      const usablePages = pages.filter((page) => page.text.trim().length > 25);
+      const extracted = await extractPages(file);
+      totalPages = extracted.totalPages;
+      const usablePages = extracted.pages.filter((page) => page.text.trim().length > 25);
       if (!usablePages.length) throw new Error("No pude extraer texto del PDF. Si es un documento escaneado, primero necesita OCR.");
 
-      const chunks = buildChunks(usablePages);
+      chunks = buildChunks(usablePages);
       if (!chunks.length) throw new Error("El documento no contiene suficiente texto para procesarlo.");
-      const sourceChars = chunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
+      sourceChars = chunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
 
       setStage("saving");
-      setStageText(userId ? "Preparando el documento en Supabase…" : "Preparando el documento…");
+      setStageText(userId ? "Preparando un punto de recuperación en Supabase…" : "Preparando el documento…");
       setProgress(14);
-      cloudId = await createCloudRow(file, totalPages, sourceChars);
+      cloudId = await createCloudRow(file, totalPages, sourceChars, chunks);
 
-      const explainedSections: ExplainedDocumentSection[] = [];
-      let glossary: GlossaryItem[] = [];
-
-      for (let index = 0; index < chunks.length; index += 1) {
-        const chunk = chunks[index];
-        const baseProgress = 16 + Math.round((index / chunks.length) * 76);
-        setStage("explaining");
-        setProgress(baseProgress);
-        setStageText(`Reexplicando ${index + 1} de ${chunks.length} · páginas ${chunk.startPage}–${chunk.endPage}…`);
-
-        const explanationResponse = await fetch("/api/document-explain", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sourceText: chunk.text,
-            startPage: chunk.startPage,
-            endPage: chunk.endPage,
-            chunkIndex: index,
-            totalChunks: chunks.length,
-            subject,
-            topic,
-            audience
-          })
-        });
-        const explanationPayload = await explanationResponse.json().catch(() => ({}));
-        if (!explanationResponse.ok) throw new Error(explanationPayload?.error || `No pude explicar la sección ${index + 1}.`);
-
-        let section = explanationPayload.section as Omit<ExplainedDocumentSection, "id" | "startPage" | "endPage" | "sourceChars" | "coverageScore" | "missingPoints">;
-
-        setStage("checking");
-        setStageText(`Comprobando que no falte contenido en la sección ${index + 1}…`);
-        setProgress(Math.min(94, baseProgress + Math.max(1, Math.round(35 / chunks.length))));
-
-        const coverageResponse = await fetch("/api/document-coverage", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sourceText: chunk.text, explainedText: section.explainedText })
-        });
-        const coveragePayload = await coverageResponse.json().catch(() => ({}));
-        if (!coverageResponse.ok) throw new Error(coveragePayload?.error || `No pude comprobar la sección ${index + 1}.`);
-        let coverage = coveragePayload.coverage as { score: number; missingPoints: string[]; verdict?: string };
-        let repaired = false;
-
-        if ((coverage.score || 0) < 90 && Array.isArray(coverage.missingPoints) && coverage.missingPoints.length) {
-          setStageText(`Completando puntos faltantes de la sección ${index + 1}…`);
-          const repairResponse = await fetch("/api/document-repair", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sourceText: chunk.text,
-              currentExplanation: section.explainedText,
-              missingPoints: coverage.missingPoints,
-              subject,
-              topic,
-              audience
-            })
-          });
-          const repairPayload = await repairResponse.json().catch(() => ({}));
-          if (repairResponse.ok && repairPayload?.section?.explainedText) {
-            section = { ...section, ...repairPayload.section };
-            repaired = true;
-            const recheckResponse = await fetch("/api/document-coverage", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ sourceText: chunk.text, explainedText: section.explainedText })
-            });
-            const recheckPayload = await recheckResponse.json().catch(() => ({}));
-            if (recheckResponse.ok && recheckPayload?.coverage) coverage = recheckPayload.coverage;
-          }
-        }
-
-        const normalized: ExplainedDocumentSection = {
-          id: `section-${index + 1}`,
-          title: String(section.title || `Sección ${index + 1}`),
-          startPage: chunk.startPage,
-          endPage: chunk.endPage,
-          sourceChars: chunk.text.length,
-          explainedText: String(section.explainedText || ""),
-          glossary: Array.isArray(section.glossary) ? section.glossary : [],
-          anchor: String(section.anchor || ""),
-          coverageScore: Math.max(0, Math.min(100, Math.round(Number(coverage.score) || 0))),
-          missingPoints: Array.isArray(coverage.missingPoints) ? coverage.missingPoints.map(String).slice(0, 8) : [],
-          repaired
-        };
-        explainedSections.push(normalized);
-        glossary = dedupeGlossary([...glossary, ...normalized.glossary]);
-        await saveCloudProgress(cloudId, explainedSections, glossary, "processing");
-      }
-
-      setStage("saving");
-      setStageText("Guardando la versión explicada…");
-      setProgress(96);
-      await saveCloudProgress(cloudId, explainedSections, glossary, "complete");
-
-      const averageCoverage = Math.round(explainedSections.reduce((sum, section) => sum + section.coverageScore, 0) / explainedSections.length);
-      const now = new Date().toISOString();
-      const completed: ExplainedDocument = {
-        id: cloudId || undefined,
-        title: file.name.replace(/\.pdf$/i, ""),
-        fileName: file.name,
-        subject,
-        topic,
-        pageCount: totalPages,
+      await runProcessing({
+        cloudId,
+        sourceChunks: chunks,
+        startIndex: 0,
+        initialSections: [],
+        initialGlossary: [],
+        totalPages,
         sourceChars,
-        sections: explainedSections,
-        glossary,
-        coverageScore: averageCoverage,
-        createdAt: now,
-        updatedAt: now,
-        lastSectionIndex: 0
-      };
-      setResult(completed);
-      setExpanded({ [explainedSections[0]?.id || ""]: true });
-      setStage("done");
-      setStageText("Documento listo");
-      setProgress(100);
-      void loadLibrary();
+        title: file.name.replace(/\.pdf$/i, ""),
+        fileName: file.name
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : "No pude preparar el documento explicado.";
       setError(message);
       setStage("error");
-      setStageText("Proceso detenido");
+      setStageText("Proceso pausado");
       if (cloudId && supabase) {
-        void supabase.from("study_documents").update({ status: "error", updated_at: new Date().toISOString() }).eq("id", cloudId);
+        // runProcessing ya guardó cada avance confirmado. Aquí solo marcamos el intento como pausado
+        // para no sobrescribir secciones o la cola de recuperación con estado antiguo del navegador.
+        void supabase.from("study_documents")
+          .update({ status: "error", updated_at: new Date().toISOString() })
+          .eq("id", cloudId);
       }
+      void loadLibrary();
+    }
+  };
+
+  const resumeSaved = async (row: SavedDocumentRow) => {
+    const processing = row.settings?.processing;
+    if (!processing?.chunks?.length) {
+      setError("Este intento se creó antes de la mejora de recuperación. Vuelve a seleccionar el PDF una vez; los siguientes intentos sí podrán reanudarse automáticamente.");
+      return;
+    }
+    cleanupAudio();
+    setError("");
+    setResult(null);
+    setStage("explaining");
+    setProgress(Math.max(16, Math.round((processing.nextChunkIndex / Math.max(1, processing.chunks.length)) * 90)));
+    setStageText(`Retomando desde la sección ${processing.nextChunkIndex + 1}…`);
+    setAudience(row.settings?.audience || audience);
+
+    try {
+      await runProcessing({
+        cloudId: row.id,
+        sourceChunks: processing.chunks,
+        startIndex: processing.nextChunkIndex,
+        initialSections: Array.isArray(row.sections) ? row.sections : [],
+        initialGlossary: Array.isArray(row.glossary) ? row.glossary : [],
+        totalPages: row.page_count,
+        sourceChars: row.source_chars,
+        title: row.title,
+        fileName: row.file_name
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "No pude continuar el documento.";
+      setError(message);
+      setStage("error");
+      setStageText("Proceso pausado");
+      if (supabase) {
+        // Igual que en un procesamiento nuevo, conservamos el último checkpoint guardado por runProcessing.
+        await supabase.from("study_documents")
+          .update({ status: "error", updated_at: new Date().toISOString() })
+          .eq("id", row.id);
+      }
+      void loadLibrary();
     }
   };
 
@@ -811,8 +1064,20 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
                 <div className="document-library-empty error"><CircleAlert size={20} /><span>{libraryError}</span></div>
               ) : libraryLoading ? (
                 <div className="document-library-empty"><LoaderCircle size={20} className="spin" /><span>Cargando tu biblioteca…</span></div>
-              ) : savedDocs.filter((doc) => doc.status === "complete").length ? (
+              ) : savedDocs.length ? (
                 <div className="document-library-list">
+                  {savedDocs.filter((doc) => doc.status !== "complete").map((doc) => {
+                    const processing = doc.settings?.processing;
+                    const completed = doc.sections?.length || 0;
+                    const total = processing?.chunks?.length || processing?.totalChunks || 0;
+                    return (
+                      <button key={doc.id} onClick={() => void resumeSaved(doc)} disabled={!processing?.chunks?.length}>
+                        <RefreshCcw size={18} />
+                        <div><strong>{doc.title}</strong><span>{processing?.chunks?.length ? `Procesamiento pausado · ${completed} de ${total} partes guardadas` : "Intento anterior · vuelve a subir el PDF para reprocesarlo"}</span></div>
+                        <span>{processing?.chunks?.length ? "Reanudar →" : "Sin recuperación"}</span>
+                      </button>
+                    );
+                  })}
                   {savedDocs.filter((doc) => doc.status === "complete").map((doc) => (
                     <button key={doc.id} onClick={() => openSaved(doc)}>
                       <FileText size={18} />
@@ -849,7 +1114,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
             <CircleAlert size={34} />
             <h3>No pude terminar el documento</h3>
             <p>{error}</p>
-            <button className="secondary-action" onClick={() => setStage("idle")}><RefreshCcw size={17} /> Volver a intentar</button>
+            <button className="secondary-action" onClick={() => { setStage("idle"); void loadLibrary(); }}><RefreshCcw size={17} /> Revisar recuperación</button>
           </div>
         )}
 
@@ -862,7 +1127,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
                 <p>{result.pageCount} páginas originales · {result.sections.length} capítulos explicados · ~{estimatedMinutes} min de audio</p>
               </div>
               <div className={`coverage-badge ${result.coverageScore >= 90 ? "good" : "review"}`}>
-                <BookOpenCheck size={17} /><strong>{result.coverageScore}%</strong><span>cobertura verificada</span>
+                <BookOpenCheck size={17} /><strong>{result.coveragePendingCount && !result.coverageScore ? "—" : `${result.coverageScore}%`}</strong><span>{result.coveragePendingCount ? `${result.coveragePendingCount} revisión${result.coveragePendingCount === 1 ? "" : "es"} pendiente${result.coveragePendingCount === 1 ? "" : "s"}` : "cobertura verificada"}</span>
               </div>
               <button className="document-new" onClick={reset}>Nuevo PDF</button>
             </section>
@@ -907,7 +1172,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
                   <article className={`document-section-card ${isCurrentAudio ? "playing" : ""}`} key={section.id}>
                     <button className="document-section-toggle" onClick={() => setExpanded((current) => ({ ...current, [section.id]: !isOpen }))}>
                       <span className="document-section-number">{index + 1}</span>
-                      <div><strong>{section.title}</strong><span>Páginas {section.startPage}–{section.endPage} · cobertura {section.coverageScore}%{section.repaired ? " · revisada automáticamente" : ""}</span></div>
+                      <div><strong>{section.title}</strong><span>Páginas {section.startPage}–{section.endPage} · {section.coveragePending ? "cobertura pendiente" : `cobertura ${section.coverageScore}%`}{section.repaired ? " · revisada automáticamente" : ""}</span></div>
                       {isOpen ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
                     </button>
                     {isOpen && (

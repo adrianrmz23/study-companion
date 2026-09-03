@@ -711,12 +711,13 @@ app.post("/api/document-explain", async (req, res) => {
     const raw = await requestJsonCompletion({
       apiKey,
       model,
-      timeoutMs: 52000,
+      timeoutMs: 80000,
       system: "Eres un profesor que reescribe documentos académicos completos para hacerlos comprensibles sin resumirlos. Devuelve únicamente el JSON solicitado.",
       user: buildDocumentExplainPrompt({ sourceText, startPage, endPage, chunkIndex, totalChunks, subject, topic, audience })
     });
     return res.json({ section: validateDocumentSection(raw, `Sección ${Number(chunkIndex) + 1}`) });
   } catch (error) {
+    console.error("[document-explain]", error instanceof Error ? error.message : error);
     const status = Number(error?.status) || 502;
     return res.status(status).json({
       error: error?.name === "AbortError"
@@ -735,14 +736,19 @@ app.post("/api/document-coverage", async (req, res) => {
     const raw = await requestJsonCompletion({
       apiKey,
       model,
-      timeoutMs: 52000,
+      timeoutMs: 65000,
       system: "Eres un auditor académico de cobertura. No reescribas el texto. Compara fuente y explicación y devuelve únicamente JSON válido.",
       user: buildCoveragePrompt({ sourceText, explainedText })
     });
     return res.json({ coverage: validateCoverage(raw) });
   } catch (error) {
+    console.error("[document-coverage]", error instanceof Error ? error.message : error);
     const status = Number(error?.status) || 502;
-    return res.status(status).json({ error: error instanceof Error ? error.message : "No pude comprobar la cobertura." });
+    return res.status(status).json({
+      error: error?.name === "AbortError"
+        ? "La revisión de cobertura tardó demasiado."
+        : error instanceof Error ? error.message : "No pude comprobar la cobertura."
+    });
   }
 });
 
@@ -755,14 +761,19 @@ app.post("/api/document-repair", async (req, res) => {
     const raw = await requestJsonCompletion({
       apiKey,
       model,
-      timeoutMs: 52000,
+      timeoutMs: 80000,
       system: "Eres un editor pedagógico de cobertura completa. Corrige omisiones sin resumir y devuelve únicamente JSON válido.",
       user: buildDocumentRepairPrompt({ sourceText, currentExplanation, missingPoints, subject, topic, audience })
     });
     return res.json({ section: validateDocumentSection(raw, "Sección revisada") });
   } catch (error) {
+    console.error("[document-repair]", error instanceof Error ? error.message : error);
     const status = Number(error?.status) || 502;
-    return res.status(status).json({ error: error instanceof Error ? error.message : "No pude completar los puntos faltantes." });
+    return res.status(status).json({
+      error: error?.name === "AbortError"
+        ? "La reparación tardó demasiado; se conservará la explicación generada."
+        : error instanceof Error ? error.message : "No pude completar los puntos faltantes."
+    });
   }
 });
 

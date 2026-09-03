@@ -6,6 +6,6 @@
     { "source": "/api/:path*", "destination": "/api" }
   ],
   "functions": {
-    "api/index.mjs": { "maxDuration": 60 }
+    "api/index.mjs": { "maxDuration": 120 }
   }
 }
