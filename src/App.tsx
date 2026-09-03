@@ -452,9 +452,11 @@ export default function App() {
 
     if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
     if (user && supabase) {
+      const supabaseClient = supabase;
+      const userId = user.id;
       sessionSaveTimerRef.current = window.setTimeout(() => {
-        void supabase.from("study_sessions")
-          .upsert(sessionToCloudRow(snapshot, user.id), { onConflict: "id" })
+        void supabaseClient.from("study_sessions")
+          .upsert(sessionToCloudRow(snapshot, userId), { onConflict: "id" })
           .then(({ error: sessionError }) => {
             if (sessionError) console.warn("No pude guardar la sesión:", sessionError.message);
           });
