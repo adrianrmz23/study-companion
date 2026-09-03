@@ -14,6 +14,8 @@ import {
   LoaderCircle,
   Pause,
   Play,
+  Rewind,
+  FastForward,
   RefreshCcw,
   Sparkles,
   Square,
@@ -107,6 +109,29 @@ type Props = {
 };
 
 type Stage = "idle" | "extracting" | "explaining" | "checking" | "saving" | "done" | "error";
+type DocumentMode = "review" | "learn" | "deep";
+
+const documentModes: Record<DocumentMode, { label: string; time: string; description: string }> = {
+  review: {
+    label: "Repaso",
+    time: "15–25 min",
+    description: "Para volver a pasar por el tema. Conserva los conceptos centrales y comprime ejemplos, historia y repeticiones."
+  },
+  learn: {
+    label: "Aprender el documento",
+    time: "35–50 min aprox.",
+    description: "Recomendado. No salta conceptos académicos importantes; los explica en lenguaje humano sin profundizar más de lo necesario."
+  },
+  deep: {
+    label: "Profundizar",
+    time: "60–90+ min",
+    description: "Usa el documento como base y añade contexto, conexiones y ejemplos para ir más allá de lo que explica el material."
+  }
+};
+
+function normalizeDocumentMode(value?: string | null): DocumentMode {
+  return value === "review" || value === "deep" ? value : "learn";
+}
 
 const rates = [0.8, 1, 1.25, 1.5];
 const MAX_FILE_MB = 40;
@@ -311,7 +336,22 @@ function estimateMinutes(sections: ExplainedDocumentSection[]) {
   return Math.max(1, Math.round(words / 150));
 }
 
-function splitSpeechText(text: string, maxChars = 8200) {
+function estimateSpeechSeconds(text: string) {
+  const words = text.split(/\s+/).filter(Boolean).length;
+  return Math.max(4, (words / 150) * 60);
+}
+
+function formatAudioTime(value: number) {
+  if (!Number.isFinite(value) || value < 0) return "0:00";
+  const total = Math.max(0, Math.round(value));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function splitSpeechText(text: string, maxChars = 2400) {
   const cleaned = text.trim();
   if (cleaned.length <= maxChars) return [cleaned];
   const paragraphs = cleaned.split(/\n{2,}/).map((item) => item.trim()).filter(Boolean);
@@ -379,6 +419,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [libraryError, setLibraryError] = useState("");
   const [audience, setAudience] = useState("Profesional de informática");
+  const [documentMode, setDocumentMode] = useState<DocumentMode>("learn");
 
   const [rate, setRate] = useState(1);
   const [audioLoading, setAudioLoading] = useState(false);
@@ -387,9 +428,74 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
   const [audioSectionIndex, setAudioSectionIndex] = useState<number | null>(null);
   const [audioSegmentIndex, setAudioSegmentIndex] = useState(0);
   const [audioSegmentCount, setAudioSegmentCount] = useState(0);
+  const [audioCurrentTime, setAudioCurrentTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [audioScrubValue, setAudioScrubValue] = useState<number | null>(null);
   const [audioError, setAudioError] = useState("");
 
   const estimatedMinutes = useMemo(() => result ? estimateMinutes(result.sections) : 0, [result]);
+
+  const audioTimeline = useMemo(() => {
+    if (!result) return [] as Array<{
+      sectionIndex: number;
+      segmentIndex: number;
+      text: string;
+      startSecond: number;
+      endSecond: number;
+      estimatedSeconds: number;
+    }>;
+
+    let cursor = 0;
+    const items: Array<{
+      sectionIndex: number;
+      segmentIndex: number;
+      text: string;
+      startSecond: number;
+      endSecond: number;
+      estimatedSeconds: number;
+    }> = [];
+
+    result.sections.forEach((section, sectionIndex) => {
+      splitSpeechText(section.explainedText).forEach((segment, segmentIndex) => {
+        const estimatedSeconds = estimateSpeechSeconds(segment);
+        items.push({
+          sectionIndex,
+          segmentIndex,
+          text: segment,
+          startSecond: cursor,
+          endSecond: cursor + estimatedSeconds,
+          estimatedSeconds
+        });
+        cursor += estimatedSeconds;
+      });
+    });
+
+    return items;
+  }, [result]);
+
+  const audioEstimatedTotalSeconds = useMemo(
+    () => audioTimeline.length ? audioTimeline[audioTimeline.length - 1].endSecond : 0,
+    [audioTimeline]
+  );
+
+  const activeTimelineItem = useMemo(
+    () => audioTimeline.find((item) => item.sectionIndex === audioSectionIndex && item.segmentIndex === audioSegmentIndex) || null,
+    [audioTimeline, audioSectionIndex, audioSegmentIndex]
+  );
+
+  const audioEstimatedElapsedSeconds = useMemo(() => {
+    if (!activeTimelineItem) {
+      if (!result) return 0;
+      const savedSection = Math.min(result.lastSectionIndex || 0, Math.max(0, result.sections.length - 1));
+      return audioTimeline.find((item) => item.sectionIndex === savedSection)?.startSecond || 0;
+    }
+    const ratio = audioDuration > 0 ? Math.max(0, Math.min(1, audioCurrentTime / audioDuration)) : 0;
+    return activeTimelineItem.startSecond + activeTimelineItem.estimatedSeconds * ratio;
+  }, [activeTimelineItem, audioCurrentTime, audioDuration, audioTimeline, result]);
+
+  const audioDisplayElapsedSeconds = audioScrubValue ?? audioEstimatedElapsedSeconds;
+  const audioEstimatedRemainingSeconds = Math.max(0, audioEstimatedTotalSeconds - audioDisplayElapsedSeconds);
+  const audioEstimatedWallRemainingSeconds = rate > 0 ? audioEstimatedRemainingSeconds / rate : audioEstimatedRemainingSeconds;
 
   const cleanupAudio = () => {
     if (audioRef.current) {
@@ -404,6 +510,8 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     setAudioPlaying(false);
     setAudioPaused(false);
     setAudioLoading(false);
+    setAudioCurrentTime(0);
+    setAudioDuration(0);
   };
 
   useEffect(() => {
@@ -487,9 +595,9 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     return { pages: stripReferences(pages), totalPages: pdf.numPages };
   };
 
-  const baseSettings = (processing?: ProcessingState): DocumentSettings => ({
+  const baseSettings = (processing?: ProcessingState, modeOverride: DocumentMode = documentMode): DocumentSettings => ({
     audience,
-    mode: "complete_not_summary",
+    mode: modeOverride,
     explainAcronyms: true,
     preserveTechnicalTerms: true,
     omitReferences: true,
@@ -537,7 +645,8 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     sections: ExplainedDocumentSection[],
     glossary: GlossaryItem[],
     status: "processing" | "complete" | "error",
-    processing?: ProcessingState
+    processing?: ProcessingState,
+    modeOverride: DocumentMode = documentMode
   ) => {
     if (!documentId || !supabase) return;
     const pendingSections = sections.filter((section) => section.coveragePending).length;
@@ -548,7 +657,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
       .update({
         sections,
         glossary,
-        settings: baseSettings(status === "complete" ? undefined : processing),
+        settings: baseSettings(status === "complete" ? undefined : processing, modeOverride),
         coverage: { score: average, checkedSections, pendingSections },
         status,
         updated_at: new Date().toISOString()
@@ -557,7 +666,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     if (updateError) throw new Error(`Supabase: ${updateError.message}`);
   };
 
-  const explainChunk = async (chunk: SourceChunk, index: number, totalChunks: number) => {
+  const explainChunk = async (chunk: SourceChunk, index: number, totalChunks: number, modeOverride: DocumentMode) => {
     return postJson("/api/document-explain", {
       sourceText: chunk.text,
       startPage: chunk.startPage,
@@ -566,12 +675,13 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
       totalChunks,
       subject,
       topic,
-      audience
+      audience,
+      documentMode: modeOverride
     });
   };
 
-  const requestCoverage = async (sourceText: string, explainedText: string) => {
-    return postJson("/api/document-coverage", { sourceText, explainedText });
+  const requestCoverage = async (sourceText: string, explainedText: string, modeOverride: DocumentMode) => {
+    return postJson("/api/document-coverage", { sourceText, explainedText, documentMode: modeOverride });
   };
 
   const runProcessing = async ({
@@ -583,7 +693,8 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     totalPages,
     sourceChars,
     title,
-    fileName
+    fileName,
+    processingMode
   }: {
     cloudId: string | null;
     sourceChunks: SourceChunk[];
@@ -594,6 +705,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     sourceChars: number;
     title: string;
     fileName: string;
+    processingMode: DocumentMode;
   }) => {
     const queue = [...sourceChunks];
     const explainedSections = [...initialSections];
@@ -610,7 +722,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
 
       let explanationPayload: any;
       try {
-        explanationPayload = await explainChunk(chunk, index, queue.length);
+        explanationPayload = await explainChunk(chunk, index, queue.length, processingMode);
       } catch (firstError) {
         if (isTimeoutLike(firstError) && chunk.text.length > 1800) {
           const smaller = splitChunkForRetry(chunk);
@@ -623,7 +735,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
               totalChunks: queue.length,
               sourceFileName: fileName,
               updatedAt: new Date().toISOString()
-            });
+            }, processingMode);
             continue;
           }
         }
@@ -632,7 +744,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
           setStageText(`Reintentando automáticamente la sección ${index + 1}…`);
           await wait(errorStatus(firstError) === 429 ? 2600 : 1200);
           try {
-            explanationPayload = await explainChunk(chunk, index, queue.length);
+            explanationPayload = await explainChunk(chunk, index, queue.length, processingMode);
           } catch (secondError) {
             if (isTimeoutLike(secondError) && chunk.text.length > 1400) {
               const smaller = splitChunkForRetry(chunk);
@@ -644,7 +756,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
                   totalChunks: queue.length,
                   sourceFileName: fileName,
                   updatedAt: new Date().toISOString()
-                });
+                }, processingMode);
                 continue;
               }
             }
@@ -664,14 +776,14 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
       let coverage: { score: number; missingPoints: string[]; verdict?: string } = { score: 0, missingPoints: [] };
       let coveragePending = false;
       try {
-        const coveragePayload = await requestCoverage(chunk.text, section.explainedText);
+        const coveragePayload = await requestCoverage(chunk.text, section.explainedText, processingMode);
         coverage = coveragePayload.coverage;
       } catch (coverageError) {
         if (isRetryable(coverageError)) {
           setStageText(`La revisión de cobertura de la sección ${index + 1} está tardando. Reintentando una vez…`);
           await wait(errorStatus(coverageError) === 429 ? 2400 : 900);
           try {
-            const retryCoverage = await requestCoverage(chunk.text, section.explainedText);
+            const retryCoverage = await requestCoverage(chunk.text, section.explainedText, processingMode);
             coverage = retryCoverage.coverage;
           } catch {
             coveragePending = true;
@@ -691,13 +803,14 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
             missingPoints: coverage.missingPoints,
             subject,
             topic,
-            audience
+            audience,
+            documentMode: processingMode
           });
           if (repairPayload?.section?.explainedText) {
             section = { ...section, ...repairPayload.section };
             repaired = true;
             try {
-              const recheckPayload = await requestCoverage(chunk.text, section.explainedText);
+              const recheckPayload = await requestCoverage(chunk.text, section.explainedText, processingMode);
               if (recheckPayload?.coverage) coverage = recheckPayload.coverage;
             } catch {
               // Conservamos la última revisión válida; una caída de la re-comprobación no borra el trabajo terminado.
@@ -734,13 +847,13 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
         totalChunks: queue.length,
         sourceFileName: fileName,
         updatedAt: new Date().toISOString()
-      });
+      }, processingMode);
     }
 
     setStage("saving");
     setStageText("Guardando la versión explicada…");
     setProgress(96);
-    await saveCloudProgress(cloudId, explainedSections, glossary, "complete");
+    await saveCloudProgress(cloudId, explainedSections, glossary, "complete", undefined, processingMode);
 
     const averageCoverage = verifiedCoverageAverage(explainedSections);
     const pendingCount = explainedSections.filter((section) => section.coveragePending).length;
@@ -806,7 +919,8 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
         totalPages,
         sourceChars,
         title: file.name.replace(/\.pdf$/i, ""),
-        fileName: file.name
+        fileName: file.name,
+        processingMode: documentMode
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "No pude preparar el documento explicado.";
@@ -838,6 +952,8 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     setStageText(`Retomando desde la sección ${processing.nextChunkIndex + 1}…`);
     setAudience(row.settings?.audience || audience);
 
+    const resumeMode = normalizeDocumentMode(row.settings?.mode);
+    setDocumentMode(resumeMode);
     try {
       await runProcessing({
         cloudId: row.id,
@@ -848,7 +964,8 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
         totalPages: row.page_count,
         sourceChars: row.source_chars,
         title: row.title,
-        fileName: row.file_name
+        fileName: row.file_name,
+        processingMode: resumeMode
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "No pude continuar el documento.";
@@ -869,6 +986,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     cleanupAudio();
     playAllRef.current = false;
     const document = rowToDocument(row);
+    setDocumentMode(normalizeDocumentMode(row.settings?.mode));
     setResult(document);
     setFile(null);
     setStage("done");
@@ -900,7 +1018,14 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
     return response.blob();
   };
 
-  const playSegment = async (sectionIndex: number, segmentIndex: number, allMode: boolean, suppliedSegments?: string[]) => {
+  const playSegment = async (
+    sectionIndex: number,
+    segmentIndex: number,
+    allMode: boolean,
+    suppliedSegments?: string[],
+    startRatio = 0,
+    startPaused = false
+  ) => {
     if (!result) return;
     const section = result.sections[sectionIndex];
     if (!section) return;
@@ -923,7 +1048,48 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
       const audio = new Audio(url);
       audio.playbackRate = rateRef.current;
       audio.preload = "auto";
+
+      let playbackStarted = false;
+      const startPlayback = async () => {
+        if (playbackStarted) return;
+        playbackStarted = true;
+        const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+        setAudioDuration(duration);
+        if (duration > 0 && startRatio > 0) {
+          audio.currentTime = Math.max(0, Math.min(duration - 0.05, duration * Math.max(0, Math.min(1, startRatio))));
+          setAudioCurrentTime(audio.currentTime);
+        }
+
+        if (startPaused) {
+          setAudioPlaying(true);
+          setAudioPaused(true);
+          setAudioLoading(false);
+          return;
+        }
+
+        try {
+          await audio.play();
+          setAudioPlaying(true);
+          setAudioPaused(false);
+          setAudioLoading(false);
+        } catch {
+          setAudioPlaying(true);
+          setAudioPaused(true);
+          setAudioLoading(false);
+          setAudioError("El navegador bloqueó la reproducción automática. Pulsa Continuar para seguir.");
+        }
+      };
+
+      audio.onloadedmetadata = () => { void startPlayback(); };
+      audio.ondurationchange = () => {
+        if (Number.isFinite(audio.duration)) setAudioDuration(audio.duration);
+      };
+      audio.ontimeupdate = () => {
+        setAudioCurrentTime(audio.currentTime || 0);
+        if (Number.isFinite(audio.duration)) setAudioDuration(audio.duration);
+      };
       audio.onended = () => {
+        setAudioCurrentTime(audio.duration || 0);
         if (segmentIndex < segments.length - 1) {
           void playSegment(sectionIndex, segmentIndex + 1, allMode, segments);
           return;
@@ -943,14 +1109,46 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
         setAudioError("No pude reproducir este tramo del documento.");
       };
       audioRef.current = audio;
-      await audio.play();
-      setAudioPlaying(true);
-      setAudioPaused(false);
-      setAudioLoading(false);
+      audio.load();
+
+      if (audio.readyState >= 1) {
+        void startPlayback();
+      }
     } catch (err) {
       cleanupAudio();
       setAudioError(err instanceof Error ? err.message : "No pude reproducir el documento.");
     }
+  };
+
+  const seekToDocumentSecond = (targetSecond: number) => {
+    if (!result || !audioTimeline.length) return;
+    const target = Math.max(0, Math.min(audioEstimatedTotalSeconds, targetSecond));
+    const item = audioTimeline.find((timelineItem) => target < timelineItem.endSecond)
+      || audioTimeline[audioTimeline.length - 1];
+    const offset = Math.max(0, target - item.startSecond);
+    const startRatio = item.estimatedSeconds > 0 ? offset / item.estimatedSeconds : 0;
+    const keepPaused = audioPaused;
+    const allMode = playAllRef.current || (!audioPlaying && !audioPaused);
+    setAudioScrubValue(null);
+    void playSegment(item.sectionIndex, item.segmentIndex, allMode, undefined, startRatio, keepPaused);
+  };
+
+  const seekRelative = (deltaSeconds: number) => {
+    const audio = audioRef.current;
+    if (audio && Number.isFinite(audio.duration) && audio.duration > 0) {
+      const next = audio.currentTime + deltaSeconds;
+      if (next >= 0 && next <= audio.duration) {
+        audio.currentTime = next;
+        setAudioCurrentTime(next);
+        return;
+      }
+    }
+    seekToDocumentSecond(audioEstimatedElapsedSeconds + deltaSeconds);
+  };
+
+  const commitScrub = () => {
+    if (audioScrubValue === null) return;
+    seekToDocumentSecond(audioScrubValue);
   };
 
   const toggleAudio = async () => {
@@ -1005,9 +1203,9 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
             <section className="document-promise">
               <div className="document-promise-icon"><FileAudio size={28} /></div>
               <div>
-                <span className="mini-label">NO ES UN RESUMEN</span>
-                <h3>El mismo contenido, pero explicado para entenderlo</h3>
-                <p>Companion recorre todo el documento, omite las referencias finales, explica siglas y tecnicismos, añade ejemplos cuando ayudan y después verifica que no haya desaparecido contenido importante.</p>
+                <span className="mini-label">COBERTURA CONCEPTUAL</span>
+                <h3>Todos los conceptos importantes, sin el lenguaje pesado</h3>
+                <p>Companion usa el documento como guía: elimina redundancias, explica siglas y tecnicismos, conserva las ideas académicas relevantes y solo amplía lo necesario para que puedas entenderlas.</p>
               </div>
             </section>
 
@@ -1036,10 +1234,22 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
                   <option>Técnico</option>
                 </select>
               </label>
+              <div className="document-mode-picker">
+                <span className="document-mode-title">¿Qué quieres obtener?</span>
+                <div className="document-mode-options">
+                  {(Object.entries(documentModes) as [DocumentMode, (typeof documentModes)[DocumentMode]][]).map(([key, option]) => (
+                    <button type="button" key={key} className={documentMode === key ? "active" : ""} onClick={() => setDocumentMode(key)}>
+                      <div><strong>{option.label}</strong><span>{option.time}</span></div>
+                      <p>{option.description}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="document-rules">
-                <span><Check size={14} /> No resumir</span>
+                <span><Check size={14} /> Cobertura conceptual</span>
                 <span><Check size={14} /> Explicar todas las siglas</span>
                 <span><Check size={14} /> Mantener términos técnicos importantes</span>
+                <span><Check size={14} /> Evitar repeticiones innecesarias</span>
                 <span><Check size={14} /> Omitir referencias</span>
               </div>
             </div>
@@ -1047,7 +1257,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
             {error && <div className="document-error"><CircleAlert size={18} /><span>{error}</span></div>}
 
             <button className="primary-action document-process-button" disabled={!file} onClick={process}>
-              <Sparkles size={18} /> Preparar documento completo
+              <Sparkles size={18} /> Preparar · {documentModes[documentMode].label}
             </button>
             <p className="document-save-note">{userId
               ? "Tu versión explicada se guardará en Supabase para continuar en otros dispositivos."
@@ -1099,7 +1309,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
             <span className="mini-label">PROCESANDO DOCUMENTO COMPLETO</span>
             <h3>{stageText}</h3>
             <div className="document-progress"><span style={{ width: `${progress}%` }} /></div>
-            <div className="document-progress-label"><span>{progress}%</span><span>Puede tardar varios minutos porque no estamos resumiendo.</span></div>
+            <div className="document-progress-label"><span>{progress}%</span><span>Puede tardar varios minutos porque verificamos que no se pierdan conceptos importantes.</span></div>
             <div className="document-stage-list">
               <span className={["extracting", "explaining", "checking", "saving"].indexOf(stage) >= 0 ? "active" : ""}><Check size={14} /> Leer estructura y quitar referencias</span>
               <span className={["explaining", "checking", "saving"].includes(stage) ? "active" : ""}><Sparkles size={14} /> Reexplicar sección por sección</span>
@@ -1122,9 +1332,9 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
           <div className="document-result">
             <section className="document-overview">
               <div className="document-overview-main">
-                <span className="mini-label">VERSIÓN EXPLICADA COMPLETA</span>
+                <span className="mini-label">DOCUMENTO EXPLICADO · {documentModes[documentMode].label.toUpperCase()}</span>
                 <h3>{result.title}</h3>
-                <p>{result.pageCount} páginas originales · {result.sections.length} capítulos explicados · ~{estimatedMinutes} min de audio</p>
+                <p>{result.pageCount} páginas originales · {result.sections.length} capítulos · ~{estimatedMinutes} min reales de audio generado</p>
               </div>
               <div className={`coverage-badge ${result.coverageScore >= 90 ? "good" : "review"}`}>
                 <BookOpenCheck size={17} /><strong>{result.coveragePendingCount && !result.coverageScore ? "—" : `${result.coverageScore}%`}</strong><span>{result.coveragePendingCount ? `${result.coveragePendingCount} revisión${result.coveragePendingCount === 1 ? "" : "es"} pendiente${result.coveragePendingCount === 1 ? "" : "s"}` : "cobertura verificada"}</span>
@@ -1133,21 +1343,62 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
             </section>
 
             <section className="document-audio-master">
-              <div>
-                <span className="mini-label">ELEVENLABS · ESCUCHAR TODO</span>
-                <h3>{audioSectionIndex !== null ? result.sections[audioSectionIndex]?.title : "Reproduce el documento como una clase"}</h3>
-                <p>{audioSectionIndex !== null ? `Capítulo ${audioSectionIndex + 1} de ${result.sections.length} · tramo ${audioSegmentIndex + 1} de ${Math.max(1, audioSegmentCount)}` : `Aproximadamente ${estimatedMinutes} minutos. Puedes pausar y continuar por capítulos.`}</p>
-              </div>
-              <div className="document-audio-controls">
-                <button className="audio-main-control" onClick={toggleAudio} disabled={audioLoading}>
-                  {audioLoading ? <LoaderCircle size={18} className="spin" /> : audioPlaying && !audioPaused ? <Pause size={18} /> : <Play size={18} />}
-                  {audioLoading ? "Generando…" : audioPlaying && !audioPaused ? "Pausar" : audioPaused ? "Continuar" : "Escuchar todo"}
-                </button>
-                <button className="audio-stop" onClick={stopAudio} disabled={!audioPlaying && !audioPaused}><Square size={15} /> Detener</button>
-                <div className="audio-rates">
-                  {rates.map((item) => <button key={item} className={rate === item ? "active" : ""} onClick={() => setRate(item)}>{item}x</button>)}
+              <div className="document-audio-header">
+                <div>
+                  <span className="mini-label">ELEVENLABS · REPRODUCTOR DEL DOCUMENTO</span>
+                  <h3>{audioSectionIndex !== null ? result.sections[audioSectionIndex]?.title : "Escucha el documento en lenguaje humano"}</h3>
+                  <p>{audioSectionIndex !== null ? `Capítulo ${audioSectionIndex + 1} de ${result.sections.length} · tramo ${audioSegmentIndex + 1} de ${Math.max(1, audioSegmentCount)}` : `Duración estimada ~${formatAudioTime(audioEstimatedTotalSeconds)}. Puedes saltar a cualquier parte.`}</p>
+                </div>
+                <div className="document-audio-time-summary">
+                  <strong>{formatAudioTime(audioDisplayElapsedSeconds)}</strong>
+                  <span>de ~{formatAudioTime(audioEstimatedTotalSeconds)}</span>
                 </div>
               </div>
+
+              <div className="document-audio-progress">
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(1, Math.round(audioEstimatedTotalSeconds))}
+                  step={1}
+                  value={Math.round(audioDisplayElapsedSeconds)}
+                  aria-label="Posición aproximada en el documento"
+                  onPointerDown={() => setAudioScrubValue(audioEstimatedElapsedSeconds)}
+                  onChange={(event) => setAudioScrubValue(Number(event.target.value))}
+                  onPointerUp={commitScrub}
+                  onPointerCancel={() => setAudioScrubValue(null)}
+                  onKeyUp={(event) => {
+                    if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commitScrub();
+                  }}
+                />
+                <div className="document-audio-progress-meta">
+                  <span>{audioDuration > 0 ? `Tramo actual ${formatAudioTime(audioCurrentTime)} / ${formatAudioTime(audioDuration)}` : "El primer tramo se genera al comenzar"}</span>
+                  <span>Faltan ~{formatAudioTime(audioEstimatedRemainingSeconds)}{rate !== 1 ? ` · a ${rate}× ≈ ${formatAudioTime(audioEstimatedWallRemainingSeconds)} reales` : ""}</span>
+                </div>
+              </div>
+
+              <div className="document-audio-toolbar">
+                <div className="document-audio-transport">
+                  <button className="audio-jump" onClick={() => seekRelative(-15)} disabled={audioLoading || (!audioPlaying && !audioPaused)} aria-label="Retroceder 15 segundos">
+                    <Rewind size={17} /> 15
+                  </button>
+                  <button className="audio-main-control" onClick={toggleAudio} disabled={audioLoading}>
+                    {audioLoading ? <LoaderCircle size={18} className="spin" /> : audioPlaying && !audioPaused ? <Pause size={18} /> : <Play size={18} />}
+                    {audioLoading ? "Generando…" : audioPlaying && !audioPaused ? "Pausar" : audioPaused ? "Continuar" : "Escuchar todo"}
+                  </button>
+                  <button className="audio-jump" onClick={() => seekRelative(15)} disabled={audioLoading || (!audioPlaying && !audioPaused)} aria-label="Adelantar 15 segundos">
+                    15 <FastForward size={17} />
+                  </button>
+                  <button className="audio-stop" onClick={stopAudio} disabled={!audioPlaying && !audioPaused}><Square size={15} /> Detener</button>
+                </div>
+                <div className="document-audio-speed">
+                  <span>Velocidad</span>
+                  <div className="audio-rates">
+                    {rates.map((item) => <button key={item} className={rate === item ? "active" : ""} onClick={() => setRate(item)}>{item}x</button>)}
+                  </div>
+                </div>
+              </div>
+              <div className="document-audio-estimate-note">La línea de tiempo total es aproximada porque ElevenLabs genera los tramos bajo demanda. El tiempo del tramo actual sí es exacto.</div>
               {audioError && <div className="document-audio-error">{audioError}</div>}
             </section>
 
@@ -1162,7 +1413,7 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
 
             <section className="document-sections">
               <div className="document-section-heading">
-                <div><span className="mini-label">LECTURA EXPLICADA</span><h3>Todo el documento, capítulo por capítulo</h3></div>
+                <div><span className="mini-label">LECTURA EXPLICADA</span><h3>Los conceptos del documento, capítulo por capítulo</h3></div>
                 <span>{result.sections.length} secciones</span>
               </div>
               {result.sections.map((section, index) => {

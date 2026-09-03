@@ -51,3 +51,8 @@ La tabla usa Row Level Security para que cada cuenta solo pueda leer y modificar
 ## Documentos explicados
 
 Ejecuta también `supabase/003_study_documents.sql`. Crea `public.study_documents` con RLS por `auth.uid()` para guardar únicamente la versión explicada, glosario, cobertura y progreso de reproducción. El PDF original no se persiste.
+
+## Sesiones de estudio (v1.5)
+Ejecuta también `supabase/004_study_sessions.sql` para activar las sesiones reales del sidebar y sincronizar sus conversaciones entre dispositivos.
+
+La tabla `study_sessions` tiene RLS: cada usuario autenticado solo puede leer, crear, actualizar o borrar sus propias sesiones.

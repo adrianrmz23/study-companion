@@ -97,3 +97,23 @@ No requiere nuevas variables de entorno. Reutiliza las de Cheaper Inference, Ele
 - Los documentos pausados pueden reanudarse desde la biblioteca.
 - El texto fuente temporal se elimina de `settings.processing` al completar el documento.
 - Vercel Function `api/index.mjs` usa `maxDuration: 120`.
+
+## Companion v1.5
+
+### Documento explicado: cobertura conceptual
+El flujo de PDF ahora ofrece tres profundidades:
+- **Repaso**: 15–25 min aprox. para volver a pasar por los conceptos centrales.
+- **Aprender el documento**: 35–50 min aprox. y opción recomendada. Conserva los conceptos académicos importantes, elimina redundancias y explica tecnicismos sin profundizar más de lo necesario.
+- **Profundizar**: 60–90+ min. Usa el documento como base y añade contexto y conexiones.
+
+La duración es orientativa: Companion usa la densidad real del PDF y el audio muestra la estimación basada en el texto finalmente generado.
+
+### Sesiones reales
+Las sesiones del sidebar ya no son ejemplos fijos. Puedes:
+- crear una nueva sesión;
+- volver a una conversación previa;
+- cambiar materia/tema y usar el tema como nombre automático de la sesión;
+- eliminar sesiones;
+- sincronizar conversaciones entre dispositivos con Supabase.
+
+Ejecuta `supabase/004_study_sessions.sql` una sola vez antes de usar la sincronización de sesiones.

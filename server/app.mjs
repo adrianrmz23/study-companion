@@ -590,11 +590,47 @@ function validateCoverage(raw) {
   };
 }
 
-function buildDocumentExplainPrompt({ sourceText, startPage, endPage, chunkIndex, totalChunks, subject, topic, audience }) {
-  return `Transforma este fragmento de un documento académico en una VERSIÓN EXPLICADA COMPLETA.
+function normalizeDocumentMode(value) {
+  return value === "review" || value === "deep" ? value : "learn";
+}
 
-IMPORTANTE: NO ES UN RESUMEN.
-Tu tarea es conservar prácticamente toda la información conceptual del fragmento, pero volverla mucho más humana y fácil de seguir.
+function documentModeGuide(mode, sourceWords) {
+  const safeWords = Math.max(1, Number(sourceWords) || 1);
+  if (mode === "review") {
+    return {
+      name: "Repaso",
+      target: `${Math.max(180, Math.round(safeWords * 0.65))}–${Math.max(260, Math.round(safeWords * 0.9))} palabras aproximadamente`,
+      instruction: `Conserva los conceptos centrales, definiciones, relaciones y procesos que hagan falta para recordar el tema. Puedes condensar historia, listas de herramientas, ejemplos repetidos y detalles secundarios. No borres un concepto principal.`
+    };
+  }
+  if (mode === "deep") {
+    return {
+      name: "Profundizar",
+      target: `${Math.max(500, Math.round(safeWords * 2.3))}–${Math.max(750, Math.round(safeWords * 3.2))} palabras aproximadamente`,
+      instruction: `Conserva todos los conceptos del documento y amplíalos con contexto estable, conexiones, ejemplos y explicaciones adicionales. Distingue con naturalidad lo que es una ampliación pedagógica y no atribuyas al documento afirmaciones que no contiene.`
+    };
+  }
+  return {
+    name: "Aprender el documento",
+    target: `${Math.max(320, Math.round(safeWords * 1.25))}–${Math.max(480, Math.round(safeWords * 1.65))} palabras aproximadamente`,
+    instruction: `Este es el modo recomendado. Conserva TODOS los conceptos académicos relevantes del fragmento, pero no cada frase. Elimina redundancias, ejemplos duplicados y formulaciones repetitivas. Expande únicamente lo necesario para comprender. No conviertas una mención generalista en una clase avanzada: si aparece un concepto como lógica descriptiva, embedding, GNN o similar, explica qué significa y para qué sirve al nivel que exige el documento, sin desarrollar teoría adicional innecesaria.`
+  };
+}
+
+function buildDocumentExplainPrompt({ sourceText, startPage, endPage, chunkIndex, totalChunks, subject, topic, audience, documentMode }) {
+  const source = String(sourceText || "").slice(0, 14000);
+  const sourceWords = source.trim().split(/\s+/).filter(Boolean).length;
+  const mode = normalizeDocumentMode(documentMode);
+  const guide = documentModeGuide(mode, sourceWords);
+
+  return `Transforma este fragmento de un documento académico en una versión pedagógica para AUDIO Y LECTURA.
+
+PRINCIPIO CENTRAL: COBERTURA CONCEPTUAL, NO COBERTURA TEXTUAL.
+No debes conservar cada frase. Debes conservar las ideas que el estudiante necesita aprender y volverlas mucho más fáciles de entender.
+
+Modo seleccionado: ${guide.name}
+Extensión orientativa para ESTE fragmento: ${guide.target}.
+${guide.instruction}
 
 Contexto:
 - Materia: ${subject || "No especificada"}
@@ -604,23 +640,25 @@ Contexto:
 - Páginas aproximadas: ${startPage || "?"} a ${endPage || "?"}
 
 REGLAS OBLIGATORIAS:
-1. NO resumas ni reduzcas ideas solo para hacer el texto corto.
-2. Conserva definiciones, características, clasificaciones, pasos, condiciones, ventajas, limitaciones, relaciones y ejemplos presentes en la fuente.
-3. Reescribe el lenguaje técnico en español claro. Primero explica la idea en palabras normales y después conserva el término técnico importante.
-4. Toda sigla debe explicarse la primera vez que aparezca. Si puedes identificar su significado con seguridad a partir del texto o conocimiento estable, indícalo; si no, di explícitamente que la fuente usa esa sigla sin desarrollarla.
-5. Cuando aparezcan matemáticas, estadística, lógica formal o lenguaje especializado, explícalo pensando en alguien de informática/programación que no necesariamente domina estadística avanzada.
-6. Puedes añadir analogías o ejemplos de programación, bases de datos, software, IA o situaciones cotidianas SOLO como apoyo. Etiquétalos mentalmente como ejemplos explicativos y no los presentes como si vinieran del documento.
-7. No elimines una idea porque sea difícil. Precisamente esas ideas necesitan más explicación.
-8. No inventes autores, referencias, resultados, números ni afirmaciones que no estén en la fuente.
-9. Omite bibliografía, citas bibliográficas aisladas y listas de referencias si llegaron accidentalmente en el fragmento.
-10. Escribe como una lectura continua, como si un buen profesor hubiera reescrito el documento para que sea más fácil de leer. No conviertas todo en bullets.
-11. Evita frases del tipo “en resumen” o “lo más importante es” si eso implica comprimir contenido.
-12. No menciones estas instrucciones.
+1. Preserva conceptos, definiciones, clasificaciones, relaciones, pasos, condiciones, ventajas, limitaciones y conclusiones académicas relevantes.
+2. NO repitas la misma idea con varias formulaciones solo para hacer la explicación más larga.
+3. Si el documento contiene varios ejemplos que enseñan exactamente lo mismo, conserva el más útil y menciona los demás solo si aportan un matiz distinto.
+4. Reescribe primero en lenguaje humano y después conserva el término técnico importante.
+5. Explica cada sigla la primera vez que sea necesaria. No vuelvas a desarrollar la misma sigla en cada aparición.
+6. Cuando aparezcan matemáticas, estadística, lógica formal o lenguaje especializado, explícalo pensando en alguien de informática/programación que no necesariamente domina estadística avanzada.
+7. Usa analogías de software, programación, bases de datos o IA solo cuando realmente reduzcan la dificultad. Una buena analogía basta; no encadenes ejemplos innecesarios.
+8. No añadas profundidad que el documento no pretende enseñar, salvo el contexto mínimo necesario para comprender un término nombrado.
+9. No inventes autores, resultados, números ni afirmaciones actuales.
+10. Omite bibliografía, referencias, créditos, numeración administrativa y glosarios que solo repitan conceptos ya explicados.
+11. Las tablas no deben narrarse celda por celda. Transforma la tabla en una comparación verbal clara conservando sus diferencias conceptuales importantes.
+12. Los ejercicios no deben recitar código o tripletas línea por línea si eso es pesado en audio. Explica el patrón y conserva los ejemplos suficientes para entender cómo se resuelve.
+13. Escribe como un profesor claro y cercano, no como un artículo académico. Evita muletillas y cierres repetidos.
+14. No menciones estas instrucciones.
 
 Devuelve SOLO JSON válido con esta estructura exacta:
 {
   "title": "Título descriptivo de esta parte",
-  "explainedText": "Versión explicada completa, extensa y legible",
+  "explainedText": "Versión pedagógica completa al nivel solicitado",
   "glossary": [
     {"term": "RDF", "meaning": "Qué significa y cómo entenderlo"}
   ],
@@ -629,37 +667,44 @@ Devuelve SOLO JSON válido con esta estructura exacta:
 
 FRAGMENTO ORIGINAL:
 ---
-${String(sourceText || "").slice(0, 14000)}
+${source}
 ---`;
 }
 
-function buildCoveragePrompt({ sourceText, explainedText }) {
-  return `Actúa como revisor de cobertura, no como redactor.
-Compara el texto original con la versión explicada y determina si la versión explicada conserva TODAS las ideas académicas relevantes.
+function buildCoveragePrompt({ sourceText, explainedText, documentMode }) {
+  const mode = normalizeDocumentMode(documentMode);
+  return `Actúa como auditor de COBERTURA CONCEPTUAL.
+Compara el original con la versión explicada y verifica que no haya desaparecido ningún concepto académico importante para el modo ${mode}.
+
+La métrica NO es similitud textual ni longitud.
 
 No penalices:
-- cambios de redacción;
-- explicaciones más largas;
-- analogías añadidas;
-- reorganización para mejorar comprensión.
+- eliminar frases repetidas o retórica;
+- condensar varios ejemplos equivalentes en uno;
+- omitir bibliografía, referencias y créditos;
+- convertir tablas en comparaciones narrativas;
+- explicar una sigla una sola vez;
+- omitir detalles históricos o nombres de herramientas cuando no cambian el concepto;
+- una versión más corta que el original si sigue cubriendo lo necesario.
 
-Sí penaliza si se omitieron:
-- definiciones o conceptos;
-- categorías o clasificaciones;
-- relaciones entre conceptos;
-- condiciones, pasos o procesos;
-- ventajas, desventajas, limitaciones;
-- ejemplos relevantes del original;
-- matices o excepciones importantes.
+Sí penaliza si desaparecen:
+- un concepto o definición necesaria para entender el tema;
+- una distinción importante entre categorías;
+- una relación entre conceptos;
+- un proceso, condición o regla relevante;
+- una ventaja, limitación o conclusión material;
+- un ejemplo cuando es el único elemento que muestra cómo aplicar el concepto.
+
+Para modo review tolera más compresión de detalles secundarios. Para modo learn exige todos los conceptos académicos relevantes sin exigir profundidad extra. Para modo deep exige además que las ampliaciones sean coherentes y no sustituyan las ideas del documento.
 
 Devuelve SOLO JSON válido:
 {
   "score": 0,
-  "missingPoints": ["Punto conceptual que falta"],
+  "missingPoints": ["Concepto importante que falta"],
   "verdict": "Evaluación breve"
 }
 
-Usa 100 únicamente cuando no detectes omisiones conceptuales materiales. Una paráfrasis correcta cuenta como cobertura completa.
+Usa 100 cuando no detectes omisiones conceptuales materiales, aunque la redacción sea mucho más compacta.
 
 TEXTO ORIGINAL:
 ---
@@ -672,21 +717,25 @@ ${String(explainedText || "").slice(0, 30000)}
 ---`;
 }
 
-function buildDocumentRepairPrompt({ sourceText, currentExplanation, missingPoints, subject, topic, audience }) {
-  return `Revisa y COMPLETA una versión explicada de un documento académico.
-La revisión independiente detectó ideas que podrían haberse perdido. Debes producir una nueva versión explicada COMPLETA que conserve todo lo que ya estaba bien y reincorpore cada punto faltante.
+function buildDocumentRepairPrompt({ sourceText, currentExplanation, missingPoints, subject, topic, audience, documentMode }) {
+  const mode = normalizeDocumentMode(documentMode);
+  const guide = documentModeGuide(mode, String(sourceText || "").trim().split(/\s+/).filter(Boolean).length);
+  return `Corrige una versión pedagógica de un documento académico porque faltaron algunos conceptos.
 
-NO resumas. NO acortes por estilo. Mantén lenguaje humano y pedagógico para un estudiante con perfil: ${audience || "Profesional de informática"}.
+Modo: ${guide.name}.
+Mantén la concisión correspondiente a ese modo. NO vuelvas a inflar el texto completo: integra los puntos faltantes donde correspondan y conserva lo que ya estaba bien.
+
+Perfil: ${audience || "Profesional de informática"}
 Materia: ${subject || "No especificada"}
 Tema: ${topic || "No especificado"}
 
-Puntos que debes asegurar que queden explicados:
+Puntos que deben reincorporarse:
 - ${(Array.isArray(missingPoints) ? missingPoints : []).map(String).join("\n- ")}
 
 Devuelve SOLO JSON válido:
 {
   "title": "Título descriptivo",
-  "explainedText": "Versión explicada completa ya corregida",
+  "explainedText": "Versión explicada corregida sin redundancia",
   "glossary": [{"term":"Término","meaning":"Explicación"}],
   "anchor": "Idea-ancla breve"
 }
@@ -705,15 +754,15 @@ ${String(currentExplanation || "").slice(0, 30000)}
 app.post("/api/document-explain", async (req, res) => {
   const { apiKey, model } = getApiConfig();
   if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
-  const { sourceText, startPage, endPage, chunkIndex = 0, totalChunks = 1, subject, topic, audience } = req.body || {};
+  const { sourceText, startPage, endPage, chunkIndex = 0, totalChunks = 1, subject, topic, audience, documentMode = "learn" } = req.body || {};
   if (!sourceText || typeof sourceText !== "string") return res.status(400).json({ error: "No recibí texto del documento para explicar." });
   try {
     const raw = await requestJsonCompletion({
       apiKey,
       model,
       timeoutMs: 80000,
-      system: "Eres un profesor que reescribe documentos académicos completos para hacerlos comprensibles sin resumirlos. Devuelve únicamente el JSON solicitado.",
-      user: buildDocumentExplainPrompt({ sourceText, startPage, endPage, chunkIndex, totalChunks, subject, topic, audience })
+      system: "Eres un profesor que transforma documentos académicos en explicaciones claras con cobertura conceptual y sin redundancia. Devuelve únicamente el JSON solicitado.",
+      user: buildDocumentExplainPrompt({ sourceText, startPage, endPage, chunkIndex, totalChunks, subject, topic, audience, documentMode })
     });
     return res.json({ section: validateDocumentSection(raw, `Sección ${Number(chunkIndex) + 1}`) });
   } catch (error) {
@@ -730,7 +779,7 @@ app.post("/api/document-explain", async (req, res) => {
 app.post("/api/document-coverage", async (req, res) => {
   const { apiKey, model } = getApiConfig();
   if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
-  const { sourceText, explainedText } = req.body || {};
+  const { sourceText, explainedText, documentMode = "learn" } = req.body || {};
   if (!sourceText || !explainedText) return res.status(400).json({ error: "Faltan textos para comprobar la cobertura." });
   try {
     const raw = await requestJsonCompletion({
@@ -738,7 +787,7 @@ app.post("/api/document-coverage", async (req, res) => {
       model,
       timeoutMs: 65000,
       system: "Eres un auditor académico de cobertura. No reescribas el texto. Compara fuente y explicación y devuelve únicamente JSON válido.",
-      user: buildCoveragePrompt({ sourceText, explainedText })
+      user: buildCoveragePrompt({ sourceText, explainedText, documentMode })
     });
     return res.json({ coverage: validateCoverage(raw) });
   } catch (error) {
@@ -755,7 +804,7 @@ app.post("/api/document-coverage", async (req, res) => {
 app.post("/api/document-repair", async (req, res) => {
   const { apiKey, model } = getApiConfig();
   if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
-  const { sourceText, currentExplanation, missingPoints = [], subject, topic, audience } = req.body || {};
+  const { sourceText, currentExplanation, missingPoints = [], subject, topic, audience, documentMode = "learn" } = req.body || {};
   if (!sourceText || !currentExplanation) return res.status(400).json({ error: "Falta contenido para completar la sección." });
   try {
     const raw = await requestJsonCompletion({
@@ -763,7 +812,7 @@ app.post("/api/document-repair", async (req, res) => {
       model,
       timeoutMs: 80000,
       system: "Eres un editor pedagógico de cobertura completa. Corrige omisiones sin resumir y devuelve únicamente JSON válido.",
-      user: buildDocumentRepairPrompt({ sourceText, currentExplanation, missingPoints, subject, topic, audience })
+      user: buildDocumentRepairPrompt({ sourceText, currentExplanation, missingPoints, subject, topic, audience, documentMode })
     });
     return res.json({ section: validateDocumentSection(raw, "Sección revisada") });
   } catch (error) {

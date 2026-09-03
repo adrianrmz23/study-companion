@@ -24,6 +24,7 @@ import {
   Send,
   Sparkles,
   Trophy,
+  Trash2,
   WandSparkles,
   X,
   XCircle
@@ -84,11 +85,18 @@ type LearningProfile = {
   updatedAt?: string;
 };
 
-const starterHistory = [
-  { title: "Inferencia lógica", meta: "IA · sesión actual" },
-  { title: "Árboles de decisión", meta: "Ciencia de Datos · ejemplo" },
-  { title: "Closures en JavaScript", meta: "Programación · ejemplo" }
-];
+type StudySession = {
+  id: string;
+  title: string;
+  subject: string;
+  topic: string;
+  messages: Message[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+const SESSION_STORAGE_KEY = "companion-sessions:v1";
+const ACTIVE_SESSION_KEY = "companion-active-session:v1";
 
 const modeCopy: Record<Mode, { label: string; placeholder: string }> = {
   Explicar: {
@@ -126,6 +134,47 @@ const emptyProfile: LearningProfile = {
 
 function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function makeSessionId() {
+  return crypto.randomUUID();
+}
+
+function sessionMessages(messages: Message[]) {
+  return messages
+    .filter((item) => !item.streaming && item.content.trim())
+    .slice(-80)
+    .map((item) => ({ ...item, content: item.content.slice(0, 24000) }));
+}
+
+function createFreshSession(subjectSeed = "Inteligencia Artificial", topicSeed = ""): StudySession {
+  const now = new Date().toISOString();
+  return {
+    id: makeSessionId(),
+    title: topicSeed.trim() || "Nueva sesión",
+    subject: subjectSeed || "Inteligencia Artificial",
+    topic: topicSeed,
+    messages: [{ ...initialMessage }],
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function parseStoredSessions(): StudySession[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredSessions(sessions: StudySession[]) {
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions.slice(0, 30)));
+  } catch {
+    // La aplicación puede seguir sin almacenamiento local.
+  }
 }
 
 function normalizeKey(value: string) {
@@ -207,7 +256,12 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"local" | "syncing" | "synced" | "error">("local");
   const [syncMessage, setSyncMessage] = useState("");
+  const [sessions, setSessions] = useState<StudySession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState("");
+  const [sessionsReady, setSessionsReady] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const sessionHydratingRef = useRef(false);
+  const sessionSaveTimerRef = useRef<number | null>(null);
 
   const contextLabel = useMemo(() => {
     const parts = [subject.trim(), topic.trim()].filter(Boolean);
@@ -288,6 +342,129 @@ export default function App() {
       listener.subscription.unsubscribe();
     };
   }, []);
+
+  const hydrateSession = (session: StudySession) => {
+    sessionHydratingRef.current = true;
+    setActiveSessionId(session.id);
+    setSubject(session.subject || "Inteligencia Artificial");
+    setTopic(session.topic || "");
+    setMessages(session.messages?.length ? session.messages : [{ ...initialMessage, id: makeId() }]);
+    setInput("");
+    setError("");
+    try { localStorage.setItem(ACTIVE_SESSION_KEY, session.id); } catch {}
+    window.setTimeout(() => { sessionHydratingRef.current = false; }, 0);
+  };
+
+  const sessionToCloudRow = (session: StudySession, userId: string) => ({
+    id: session.id,
+    user_id: userId,
+    title: session.title,
+    subject: session.subject,
+    topic: session.topic,
+    messages: sessionMessages(session.messages),
+    created_at: session.createdAt,
+    updated_at: session.updatedAt
+  });
+
+  useEffect(() => {
+    if (!authReady) return;
+    let cancelled = false;
+
+    const loadSessions = async () => {
+      setSessionsReady(false);
+      let localSessions = parseStoredSessions();
+      let available = localSessions;
+
+      if (user && supabase) {
+        const { data, error: sessionError } = await supabase
+          .from("study_sessions")
+          .select("id,title,subject,topic,messages,created_at,updated_at")
+          .eq("user_id", user.id)
+          .order("updated_at", { ascending: false })
+          .limit(30);
+
+        if (!sessionError && Array.isArray(data)) {
+          const cloudSessions: StudySession[] = data.map((row: any) => ({
+            id: String(row.id),
+            title: String(row.title || row.topic || "Nueva sesión"),
+            subject: String(row.subject || "Inteligencia Artificial"),
+            topic: String(row.topic || ""),
+            messages: Array.isArray(row.messages) && row.messages.length ? row.messages as Message[] : [{ ...initialMessage }],
+            createdAt: String(row.created_at || new Date().toISOString()),
+            updatedAt: String(row.updated_at || new Date().toISOString())
+          }));
+
+          if (cloudSessions.length) {
+            available = cloudSessions;
+          } else if (localSessions.length) {
+            await supabase.from("study_sessions").upsert(localSessions.map((session) => sessionToCloudRow(session, user.id)), { onConflict: "id" });
+            available = localSessions;
+          }
+        } else if (sessionError) {
+          console.warn("No pude cargar study_sessions; usaré las sesiones locales:", sessionError.message);
+        }
+      }
+
+      if (!available.length) {
+        const fresh = createFreshSession(subject || "Inteligencia Artificial", topic);
+        available = [fresh];
+        if (user && supabase) {
+          await supabase.from("study_sessions").upsert(sessionToCloudRow(fresh, user.id), { onConflict: "id" });
+        }
+      }
+
+      if (cancelled) return;
+      available = [...available].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+      setSessions(available);
+      writeStoredSessions(available);
+      const preferred = (() => { try { return localStorage.getItem(ACTIVE_SESSION_KEY); } catch { return null; } })();
+      const selected = available.find((session) => session.id === preferred) || available[0];
+      setSessionsReady(true);
+      hydrateSession(selected);
+    };
+
+    void loadSessions();
+    return () => { cancelled = true; };
+  }, [authReady, user?.id]);
+
+  useEffect(() => {
+    if (!sessionsReady || !activeSessionId || sessionHydratingRef.current) return;
+    const now = new Date().toISOString();
+    const cleanMessages = sessionMessages(messages);
+    const nextTitle = topic.trim() || "Nueva sesión";
+
+    const currentSession = sessions.find((session) => session.id === activeSessionId);
+    if (!currentSession) return;
+    const snapshot: StudySession = {
+      ...currentSession,
+      title: nextTitle,
+      subject,
+      topic,
+      messages: cleanMessages.length ? cleanMessages : [{ ...initialMessage }],
+      updatedAt: now
+    };
+    setSessions((current) => {
+      const next = current.map((session) => session.id === activeSessionId ? snapshot : session);
+      const sorted = [...next].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+      writeStoredSessions(sorted);
+      return sorted;
+    });
+
+    if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
+    if (user && supabase) {
+      sessionSaveTimerRef.current = window.setTimeout(() => {
+        void supabase.from("study_sessions")
+          .upsert(sessionToCloudRow(snapshot, user.id), { onConflict: "id" })
+          .then(({ error: sessionError }) => {
+            if (sessionError) console.warn("No pude guardar la sesión:", sessionError.message);
+          });
+      }, 700);
+    }
+
+    return () => {
+      if (sessionSaveTimerRef.current) window.clearTimeout(sessionSaveTimerRef.current);
+    };
+  }, [subject, topic, messages, activeSessionId, sessionsReady, user?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -628,9 +805,41 @@ export default function App() {
 
   const newSession = () => {
     if (sending) return;
-    setMessages([{ ...initialMessage, id: makeId() }]);
-    setInput("");
-    setError("");
+    const fresh = createFreshSession(subject || "Inteligencia Artificial");
+    const next = [fresh, ...sessions];
+    setSessions(next);
+    writeStoredSessions(next);
+    hydrateSession(fresh);
+    if (user && supabase) {
+      void supabase.from("study_sessions")
+        .upsert(sessionToCloudRow(fresh, user.id), { onConflict: "id" });
+    }
+  };
+
+  const openStudySession = (session: StudySession) => {
+    if (sending || session.id === activeSessionId) return;
+    hydrateSession(session);
+    setHistoryOpen(false);
+  };
+
+  const deleteStudySession = async (session: StudySession) => {
+    if (sending) return;
+    const confirmed = window.confirm(`¿Eliminar la sesión “${session.title}”? Esta acción quitará también su conversación guardada.`);
+    if (!confirmed) return;
+
+    let remaining = sessions.filter((item) => item.id !== session.id);
+    if (!remaining.length) remaining = [createFreshSession(subject || "Inteligencia Artificial")];
+    setSessions(remaining);
+    writeStoredSessions(remaining);
+
+    if (session.id === activeSessionId) hydrateSession(remaining[0]);
+
+    if (user && supabase) {
+      const { error: deleteError } = await supabase.from("study_sessions").delete().eq("id", session.id).eq("user_id", user.id);
+      if (deleteError) console.warn("No pude eliminar la sesión de Supabase:", deleteError.message);
+      const replacement = remaining.find((item) => item.id !== session.id && item.createdAt === item.updatedAt && item.title === "Nueva sesión");
+      if (replacement) await supabase.from("study_sessions").upsert(sessionToCloudRow(replacement, user.id), { onConflict: "id" });
+    }
   };
 
   const useResearchInChat = (result: ResearchResult) => {
@@ -728,14 +937,21 @@ export default function App() {
 
         <div className="side-title">Sesiones recientes</div>
         <div className="history-list">
-          {starterHistory.map((item, index) => (
-            <button className={`history-item ${index === 0 ? "active" : ""}`} key={item.title}>
-              <MessageCircle size={17} />
-              <div>
-                <strong>{item.title}</strong>
-                <span>{item.meta}</span>
-              </div>
-            </button>
+          {!sessionsReady ? (
+            <div className="history-loading"><LoaderCircle size={15} className="spin" /> Cargando sesiones…</div>
+          ) : sessions.slice(0, 12).map((item) => (
+            <div className={`history-item-row ${item.id === activeSessionId ? "active" : ""}`} key={item.id}>
+              <button className="history-item" onClick={() => openStudySession(item)}>
+                <MessageCircle size={17} />
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>{item.subject || "Sin materia"} · {item.id === activeSessionId ? "sesión actual" : new Date(item.updatedAt).toLocaleDateString("es-MX", { day: "2-digit", month: "short" })}</span>
+                </div>
+              </button>
+              <button className="history-delete" onClick={() => void deleteStudySession(item)} aria-label={`Eliminar ${item.title}`} title="Eliminar sesión">
+                <Trash2 size={15} />
+              </button>
+            </div>
           ))}
         </div>
 
@@ -848,9 +1064,9 @@ export default function App() {
           <section className="document-launch-card">
             <div className="tool-card-icon document"><FileAudio size={20} /></div>
             <div>
-              <span className="mini-label">NUEVO · DOCUMENTO EXPLICADO</span>
-              <strong>Sube un PDF y conviértelo en una clase completa</strong>
-              <p>No resume: reexplica todo el contenido en lenguaje humano, aclara siglas, comprueba cobertura y lo narra con ElevenLabs.</p>
+              <span className="mini-label">DOCUMENTO EXPLICADO</span>
+              <strong>Aprende un PDF sin pelearte con el lenguaje técnico</strong>
+              <p>Conserva los conceptos importantes, elimina redundancia y adapta la profundidad a Repaso, Aprender o Profundizar.</p>
             </div>
             <button onClick={() => setDocumentOpen(true)}><FileAudio size={17} /> Subir PDF</button>
           </section>
