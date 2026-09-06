@@ -65,3 +65,15 @@ La primera reproducción de cada tramo usa ElevenLabs. Después el MP3 se guarda
 
 La sección **Audios** del sidebar permite buscar, filtrar, continuar, abrir capítulos, renombrar y eliminar documentos de audio. Al eliminar uno también se limpian sus MP3 cacheados.
 
+
+## Companion v1.7 · Sesiones guiadas, notas y repaso espaciado
+
+Ejecuta `supabase/006_guided_study_notes_review.sql` después de la migración 005.
+
+Crea tres tablas protegidas con RLS:
+
+- `audio_notes`: marcadores y notas ligados al minuto/capítulo de una audioclase.
+- `review_items`: cola de repaso espaciado derivada de los conceptos medidos en quizzes.
+- `guided_study_runs`: progreso de las sesiones guiadas de 20, 40 o 60 minutos.
+
+No requiere nuevas variables de entorno ni buckets adicionales.

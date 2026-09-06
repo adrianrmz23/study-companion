@@ -36,6 +36,8 @@ import SpeakButton from "./SpeakButton";
 import AuthModal from "./AuthModal";
 import DocumentExplainerModal from "./DocumentExplainerModal";
 import AudioLibrary from "./AudioLibrary";
+import SpacedReview from "./SpacedReview";
+import SubjectsLibrary from "./SubjectsLibrary";
 import { supabase, supabaseConfigured } from "./supabase";
 
 type Mode = "Explicar" | "Sintetizar" | "Ejemplo" | "Otra forma";
@@ -251,7 +253,8 @@ export default function App() {
   const [audioFocusText, setAudioFocusText] = useState("");
   const [adaptiveOpen, setAdaptiveOpen] = useState(false);
   const [documentOpen, setDocumentOpen] = useState(false);
-  const [workspaceView, setWorkspaceView] = useState<"study" | "audio">("study");
+  const [workspaceView, setWorkspaceView] = useState<"study" | "audio" | "review" | "subjects">("study");
+  const [audioFocusDocumentId, setAudioFocusDocumentId] = useState<string | null>(null);
   const [profile, setProfile] = useState<LearningProfile>(emptyProfile);
   const [user, setUser] = useState<User | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
@@ -952,6 +955,14 @@ export default function App() {
             <Headphones size={17} /> <span>Audios</span>
             <small>Biblioteca</small>
           </button>
+          <button className={workspaceView === "review" ? "active" : ""} onClick={() => setWorkspaceView("review")}>
+            <RefreshCcw size={17} /> <span>Repaso</span>
+            <small>Espaciado</small>
+          </button>
+          <button className={workspaceView === "subjects" ? "active" : ""} onClick={() => setWorkspaceView("subjects")}>
+            <BookOpen size={17} /> <span>Materias</span>
+            <small>Maestría</small>
+          </button>
         </nav>
 
         <div className="side-title">Sesiones recientes</div>
@@ -1020,12 +1031,34 @@ export default function App() {
         </div>
       </aside>
 
-      <main className={`main ${workspaceView === "audio" ? "audio-main" : ""}`}>
+      <main className={`main ${workspaceView !== "study" ? "audio-main" : ""}`}>
         {workspaceView === "audio" ? (
           <AudioLibrary
             userId={user?.id || null}
             onRequireAuth={() => setAuthOpen(true)}
             onCreateAudio={() => {
+              setWorkspaceView("study");
+              setDocumentOpen(true);
+            }}
+            focusDocumentId={audioFocusDocumentId}
+            onFocusHandled={() => setAudioFocusDocumentId(null)}
+          />
+        ) : workspaceView === "review" ? (
+          <SpacedReview userId={user?.id || null} onRequireAuth={() => setAuthOpen(true)} />
+        ) : workspaceView === "subjects" ? (
+          <SubjectsLibrary
+            userId={user?.id || null}
+            sessions={sessions}
+            onOpenSession={(id) => {
+              const target = sessions.find((session) => session.id === id);
+              if (target) openStudySession(target);
+              setWorkspaceView("study");
+            }}
+            onOpenAudio={(documentId) => {
+              setAudioFocusDocumentId(documentId);
+              setWorkspaceView("audio");
+            }}
+            onCreateDocument={() => {
               setWorkspaceView("study");
               setDocumentOpen(true);
             }}

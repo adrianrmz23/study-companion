@@ -1081,6 +1081,116 @@ app.post("/api/quiz", async (req, res) => {
 
 
 
+
+function validateSingleStudyQuestion(raw, fallbackConcept = "Concepto actual") {
+  const options = Array.isArray(raw?.options) ? raw.options.slice(0, 4).map(String) : [];
+  const answerIndex = Number(raw?.answerIndex);
+  if (!raw?.question || options.length !== 4 || !Number.isInteger(answerIndex) || answerIndex < 0 || answerIndex > 3) {
+    throw new Error("La pregunta de comprobación no tiene el formato esperado.");
+  }
+  return {
+    question: String(raw.question).trim().slice(0, 650),
+    options: options.map((item) => item.trim().slice(0, 320)),
+    answerIndex,
+    explanation: String(raw?.explanation || "Revisa la idea principal antes de continuar.").trim().slice(0, 900),
+    concept: String(raw?.concept || fallbackConcept).trim().slice(0, 120)
+  };
+}
+
+app.post("/api/audio-question", async (req, res) => {
+  const { apiKey, model } = getApiConfig();
+  if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
+  const { subject, topic, sectionTitle, segmentText, question } = req.body || {};
+  if (!question || typeof question !== "string") return res.status(400).json({ error: "Escribe una pregunta sobre lo que estás escuchando." });
+  if (!segmentText || typeof segmentText !== "string") return res.status(400).json({ error: "No recibí el fragmento de audio actual." });
+
+  try {
+    const raw = await requestJsonCompletion({
+      apiKey,
+      model,
+      system: "Eres un tutor que responde dudas surgidas mientras el estudiante escucha una audioclase. Devuelve únicamente JSON válido.",
+      user: `Materia: ${subject || "No especificada"}\nTema: ${topic || "No especificado"}\nCapítulo: ${sectionTitle || "No especificado"}\n\nFragmento que el estudiante estaba escuchando:\n---\n${String(segmentText).slice(0, 7000)}\n---\n\nPregunta del estudiante: ${String(question).slice(0, 1200)}\n\nResponde en lenguaje humano, usando primero la idea sencilla y después el término técnico si hace falta. No introduzcas profundidad ajena al fragmento salvo una aclaración mínima necesaria.\n\nDevuelve SOLO JSON:\n{\n  "answer": "Respuesta clara de 2 a 6 párrafos cortos",\n  "remember": "Una frase breve que conviene recordar"\n}`,
+      timeoutMs: 70000
+    });
+    return res.json({
+      answer: String(raw?.answer || "").trim().slice(0, 7000),
+      remember: String(raw?.remember || "").trim().slice(0, 600)
+    });
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return res.status(status).json({ error: error instanceof Error ? error.message : "No pude responder la duda del audio." });
+  }
+});
+
+app.post("/api/study-check", async (req, res) => {
+  const { apiKey, model } = getApiConfig();
+  if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
+  const { subject, topic, sectionTitle, sectionText } = req.body || {};
+  if (!sectionText || typeof sectionText !== "string") return res.status(400).json({ error: "No recibí contenido para comprobar." });
+
+  try {
+    const raw = await requestJsonCompletion({
+      apiKey,
+      model,
+      system: "Eres un tutor que crea una sola comprobación breve de comprensión. Devuelve únicamente JSON válido.",
+      user: `Crea UNA pregunta de opción múltiple para comprobar que el estudiante entendió la idea principal de este capítulo.\n\nMateria: ${subject || "No especificada"}\nTema: ${topic || "No especificado"}\nCapítulo: ${sectionTitle || "Capítulo actual"}\n\nContenido:\n---\n${String(sectionText).slice(0, 10000)}\n---\n\nRequisitos:\n- 4 opciones y solo una correcta.\n- No preguntes una frase literal ni un dato trivial.\n- Evalúa comprensión o aplicación sencilla.\n- La explicación debe ser breve y pedagógica.\n\nDevuelve SOLO JSON:\n{\n "question":"...",\n "options":["A","B","C","D"],\n "answerIndex":0,\n "explanation":"...",\n "concept":"Concepto principal"\n}`,
+      timeoutMs: 70000
+    });
+    return res.json({ question: validateSingleStudyQuestion(raw, sectionTitle || topic) });
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return res.status(status).json({ error: error instanceof Error ? error.message : "No pude crear la comprobación." });
+  }
+});
+
+app.post("/api/study-final-quiz", async (req, res) => {
+  const { apiKey, model } = getApiConfig();
+  if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
+  const { subject, topic, sourceText } = req.body || {};
+  if (!sourceText || typeof sourceText !== "string") return res.status(400).json({ error: "No recibí contenido de la sesión." });
+
+  try {
+    const raw = await requestJsonCompletion({
+      apiKey,
+      model,
+      system: "Eres un evaluador pedagógico. Devuelve únicamente JSON válido con exactamente 3 preguntas.",
+      user: `Genera un quiz FINAL de EXACTAMENTE 3 preguntas sobre el contenido trabajado en esta sesión guiada.\n\nMateria: ${subject || "No especificada"}\nTema: ${topic || "No especificado"}\n\nContenido estudiado:\n---\n${String(sourceText).slice(0, 18000)}\n---\n\nUsa 4 opciones por pregunta, una correcta y una explicación breve. Prioriza comprensión y conexión entre ideas.\n\nDevuelve SOLO JSON con el mismo formato de un quiz:\n{\n "title":"Cierre de la sesión",\n "questions":[\n   {"question":"...","options":["A","B","C","D"],"answerIndex":0,"explanation":"...","concept":"..."}\n ]\n}`,
+      timeoutMs: 80000
+    });
+    return res.json({ quiz: validateQuiz(raw, topic || "Sesión guiada") });
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return res.status(status).json({ error: error instanceof Error ? error.message : "No pude preparar el quiz final." });
+  }
+});
+
+app.post("/api/review-question", async (req, res) => {
+  const { apiKey, model } = getApiConfig();
+  if (!apiKey) return res.status(500).json({ error: "Falta CHEAPER_INFERENCE_API_KEY." });
+  const { subject, topic, concept } = req.body || {};
+  if (!concept || typeof concept !== "string") return res.status(400).json({ error: "Falta el concepto a repasar." });
+
+  try {
+    const raw = await requestJsonCompletion({
+      apiKey,
+      model,
+      system: "Eres un tutor de repaso espaciado. Devuelve únicamente JSON válido.",
+      user: `Prepara una tarjeta de recuerdo activo para repasar un concepto.\n\nMateria: ${subject || "No especificada"}\nTema: ${topic || "No especificado"}\nConcepto: ${concept}\n\nLa pregunta debe obligar a recordar o explicar la idea, no solo reconocer una definición. La respuesta debe ser corta pero suficiente para autoevaluarse.\n\nDevuelve SOLO JSON:\n{\n "question":"Pregunta de recuerdo activo",\n "answer":"Respuesta modelo en lenguaje claro",\n "tip":"Pista muy breve que no revele toda la respuesta"\n}`,
+      timeoutMs: 65000
+    });
+    return res.json({
+      card: {
+        question: String(raw?.question || `Explica con tus palabras: ${concept}`).trim().slice(0, 700),
+        answer: String(raw?.answer || "Revisa el concepto en Companion.").trim().slice(0, 1800),
+        tip: String(raw?.tip || "Piensa primero en para qué sirve.").trim().slice(0, 500)
+      }
+    });
+  } catch (error) {
+    const status = Number(error?.status) || 502;
+    return res.status(status).json({ error: error instanceof Error ? error.message : "No pude preparar el repaso." });
+  }
+});
+
 function getElevenLabsConfig() {
   return {
     apiKey: process.env.ELEVENLABS_API_KEY?.trim(),
