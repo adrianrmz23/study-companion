@@ -23,6 +23,7 @@ import {
   X
 } from "lucide-react";
 import { supabase } from "./supabase";
+import { getOrCreateAudioBlob } from "./audioCache";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -998,24 +999,36 @@ export default function DocumentExplainerModal({ open, userId, subject, topic, o
 
   const saveListeningProgress = async (sectionIndex: number) => {
     if (!result?.id || !userId || !supabase) return;
+    const completedTimeline = audioTimeline.filter((item) => item.sectionIndex <= sectionIndex);
+    const sectionEnd = completedTimeline.length ? completedTimeline[completedTimeline.length - 1].endSecond : 0;
+    const complete = sectionIndex >= result.sections.length - 1;
     void supabase
       .from("study_documents")
-      .update({ last_section_index: sectionIndex, updated_at: new Date().toISOString() })
+      .update({
+        last_section_index: sectionIndex,
+        audio_progress: {
+          sectionIndex,
+          segmentIndex: 0,
+          segmentRatio: complete ? 1 : 0,
+          documentSecond: sectionEnd,
+          completed: complete,
+          rate,
+          updatedAt: new Date().toISOString()
+        },
+        last_played_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
       .eq("id", result.id)
       .eq("user_id", userId);
   };
 
   const createAudioForText = async (text: string) => {
-    const response = await fetch("/api/speech", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
+    const audio = await getOrCreateAudioBlob({
+      userId,
+      documentId: result?.id || null,
+      text
     });
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new Error(data?.error || "No pude generar este tramo con ElevenLabs.");
-    }
-    return response.blob();
+    return audio.blob;
   };
 
   const playSegment = async (

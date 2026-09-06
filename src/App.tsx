@@ -35,6 +35,7 @@ import AdaptiveModal from "./AdaptiveModal";
 import SpeakButton from "./SpeakButton";
 import AuthModal from "./AuthModal";
 import DocumentExplainerModal from "./DocumentExplainerModal";
+import AudioLibrary from "./AudioLibrary";
 import { supabase, supabaseConfigured } from "./supabase";
 
 type Mode = "Explicar" | "Sintetizar" | "Ejemplo" | "Otra forma";
@@ -250,6 +251,7 @@ export default function App() {
   const [audioFocusText, setAudioFocusText] = useState("");
   const [adaptiveOpen, setAdaptiveOpen] = useState(false);
   const [documentOpen, setDocumentOpen] = useState(false);
+  const [workspaceView, setWorkspaceView] = useState<"study" | "audio">("study");
   const [profile, setProfile] = useState<LearningProfile>(emptyProfile);
   const [user, setUser] = useState<User | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
@@ -807,6 +809,7 @@ export default function App() {
 
   const newSession = () => {
     if (sending) return;
+    setWorkspaceView("study");
     const fresh = createFreshSession(subject || "Inteligencia Artificial");
     const next = [fresh, ...sessions];
     setSessions(next);
@@ -819,7 +822,11 @@ export default function App() {
   };
 
   const openStudySession = (session: StudySession) => {
-    if (sending || session.id === activeSessionId) return;
+    if (sending || session.id === activeSessionId) {
+      setWorkspaceView("study");
+      return;
+    }
+    setWorkspaceView("study");
     hydrateSession(session);
     setHistoryOpen(false);
   };
@@ -937,6 +944,16 @@ export default function App() {
           Nueva sesión
         </button>
 
+        <nav className="sidebar-workspaces" aria-label="Áreas de Companion">
+          <button className={workspaceView === "study" ? "active" : ""} onClick={() => setWorkspaceView("study")}>
+            <MessageCircle size={17} /> <span>Tutor</span>
+          </button>
+          <button className={workspaceView === "audio" ? "active audio" : "audio"} onClick={() => setWorkspaceView("audio")}>
+            <Headphones size={17} /> <span>Audios</span>
+            <small>Biblioteca</small>
+          </button>
+        </nav>
+
         <div className="side-title">Sesiones recientes</div>
         <div className="history-list">
           {!sessionsReady ? (
@@ -1003,7 +1020,18 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="main">
+      <main className={`main ${workspaceView === "audio" ? "audio-main" : ""}`}>
+        {workspaceView === "audio" ? (
+          <AudioLibrary
+            userId={user?.id || null}
+            onRequireAuth={() => setAuthOpen(true)}
+            onCreateAudio={() => {
+              setWorkspaceView("study");
+              setDocumentOpen(true);
+            }}
+          />
+        ) : (
+          <>
         <header className="topbar">
           <button className="history-toggle" onClick={() => setHistoryOpen(true)}>
             <Clock3 size={19} />
@@ -1181,6 +1209,8 @@ export default function App() {
           </div>
           <div className="composer-hint">Enter para enviar · Shift + Enter para salto de línea</div>
         </form>
+          </>
+        )}
       </main>
 
       <DocumentExplainerModal

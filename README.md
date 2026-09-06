@@ -117,3 +117,12 @@ Las sesiones del sidebar ya no son ejemplos fijos. Puedes:
 - sincronizar conversaciones entre dispositivos con Supabase.
 
 Ejecuta `supabase/004_study_sessions.sql` una sola vez antes de usar la sincronización de sesiones.
+
+## Companion v1.6 · Biblioteca de audio y caché de ElevenLabs
+
+Ejecuta `supabase/005_audio_library_cache.sql` una sola vez en Supabase SQL Editor. Esta migración añade progreso de escucha a `study_documents` y crea el bucket privado `study-audio` con políticas RLS por usuario.
+
+La primera reproducción de cada tramo usa ElevenLabs. Después el MP3 se guarda en Supabase Storage y las siguientes reproducciones reutilizan ese archivo, incluso en otros dispositivos con la misma cuenta. Si cambias `ELEVENLABS_VOICE_ID` o `ELEVENLABS_MODEL`, Companion genera una nueva versión de caché automáticamente.
+
+La sección **Audios** del sidebar permite buscar, filtrar, continuar, abrir capítulos, renombrar y eliminar documentos de audio. Al eliminar uno también se limpian sus MP3 cacheados.
+

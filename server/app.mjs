@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import { createHash } from "node:crypto";
 
 dotenv.config();
 
@@ -1101,12 +1102,16 @@ function cleanSpeechText(value = "") {
 
 app.get("/api/audio-health", (_req, res) => {
   const { apiKey, voiceId, model } = getElevenLabsConfig();
+  const cacheVersion = voiceId
+    ? createHash("sha256").update(`${voiceId}:${model}:mp3_44100_128:v1`).digest("hex").slice(0, 16)
+    : "voice-v1";
   res.json({
     ok: Boolean(apiKey && voiceId),
     provider: "ElevenLabs",
     configured: Boolean(apiKey && voiceId),
     model,
-    outputFormat: "mp3_44100_128"
+    outputFormat: "mp3_44100_128",
+    cacheVersion
   });
 });
 
